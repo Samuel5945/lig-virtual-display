@@ -229,12 +229,15 @@ def doctor():
     mounted yet" apart from "the driver is wedged".
     """
     rc, out, err = _ka("doctor")
+    unreachable = "DRIVER NOT REACHABLE" in out
     wedged = "WEDGED" in out
     healthy = "HEALTHY" in out
     not_attached = "not on the desktop" in out
     add_failed = "IOCTL_ADD FAILED" in out
 
-    if wedged:
+    if unreachable:
+        verdict = "适配器已禁用或驱动未加载 —— 点「重置驱动并启动」"
+    elif wedged:
         verdict = "驱动卡死：能接受指令但不创建显示器"
     elif add_failed:
         verdict = "IOCTL_ADD 失败"
@@ -248,6 +251,7 @@ def doctor():
     return {
         "ok": rc == 0,
         "rc": rc,
+        "unreachable": unreachable,
         "wedged": wedged,
         "healthy": healthy,
         "not_attached": not_attached,

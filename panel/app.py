@@ -67,6 +67,18 @@ QFrame#Card {
 }
 QFrame#CardDanger { background-color: %(card)s; border: 1px solid %(danger_dim)s; border-radius: 12px; }
 
+QFrame#Banner {
+    background-color: #2a1b1b;
+    border: 1px solid %(danger_dim)s;
+    border-radius: 10px;
+}
+QLabel#BannerText { color: #ffd9d9; font-size: 11.5px; }
+QPushButton#BannerBtn {
+    background-color: %(danger)s; border: 1px solid %(danger)s;
+    color: #2a0d0d; font-weight: 600; padding: 6px 14px; min-width: 0;
+}
+QPushButton#BannerBtn:hover { background-color: #ff9a9a; border-color: #ff9a9a; }
+
 QPushButton {
     background-color: #1f242e;
     border: 1px solid %(border)s;
@@ -337,6 +349,26 @@ class Main(QWidget):
         root.addLayout(head)
         root.addSpacing(4)
 
+        # ---- alert banner: only shown when the driver needs attention ----
+        # The reset buttons live at the bottom of a long scroll area, so a
+        # disabled/wedged driver would otherwise hide its own fix below the fold.
+        self.banner = QFrame()
+        self.banner.setObjectName("Banner")
+        bl_ = QHBoxLayout(self.banner)
+        bl_.setContentsMargins(14, 10, 12, 10)
+        bl_.setSpacing(10)
+        self.banner_dot = Dot(False, C["danger"], 8)
+        bl_.addWidget(self.banner_dot, 0, Qt.AlignVCenter)
+        self.banner_text = QLabel("")
+        self.banner_text.setObjectName("BannerText")
+        self.banner_text.setWordWrap(True)
+        bl_.addWidget(self.banner_text, 1)
+        self.banner_btn = QPushButton("立即重置驱动")
+        self.banner_btn.setObjectName("BannerBtn")
+        bl_.addWidget(self.banner_btn, 0, Qt.AlignVCenter)
+        self.banner.setVisible(False)
+        root.addWidget(self.banner)
+
         # scrollable body - horizontal scrolling must never happen: a long value
         # label would otherwise widen the layout and pop both scrollbars out
         scroll = QScrollArea()
@@ -476,6 +508,7 @@ class Main(QWidget):
         self.btn_auto.clicked.connect(self._apply_autostart)
         self.btn_reset.clicked.connect(self._reset)
         self.btn_doctor.clicked.connect(self._doctor)
+        self.banner_btn.clicked.connect(self._reset)
         self.seg_group.buttonClicked.connect(self._switch)
         self.chk_follow.stateChanged.connect(self._follow_changed)
 
@@ -532,9 +565,12 @@ class Main(QWidget):
         s = backend.status()
         self._st = s
 
-        self.val_driver.setText(
-            "v%s（err %s）" % (s["driver_version"], s["driver_error"])
-            if s["driver_version"] is not None else "未检测到")
+        driver_ok = s["driver_version"] is not None
+        if driver_ok:
+            self.val_driver.setText("v%s（err %s）" % (s["driver_version"], s["driver_error"]))
+        else:
+            self.val_driver.setText("未检测到")
+            self.val_driver.setStyleSheet("color:%s;font-weight:600;" % C["danger"])
 
         if s["daemon_running"]:
             pid = " PID %s" % s["daemon_pid"] if s["daemon_pid"] else ""
@@ -595,7 +631,9 @@ class Main(QWidget):
         # header pill
         healthy = bool(vd) and s["daemon_running"]
         polluted = len(vd) > 1 or bool(orphans)
-        if healthy and not polluted:
+        if not driver_ok:
+            tone, word = C["danger"], "适配器已禁用"
+        elif healthy and not polluted:
             tone, word = C["success"], "运行中"
         elif orphans and not vd:
             tone, word = C["danger"], "残留挡路"
@@ -613,6 +651,8 @@ class Main(QWidget):
             % (tone, "#1b2a27" if tone == C["success"] else
                "#2a1f1b" if tone == C["warning"] else "#2a1b1b"))
 
+        self._update_banner(s, driver_ok)
+
         # form state
         if s["configured_resolution"] and not self.cmb_res.signalsBlocked():
             idx = self.cmb_res.findText(s["configured_resolution"])
@@ -624,6 +664,30 @@ class Main(QWidget):
         self.chk_auto.setChecked(bool(auto))
 
         self.txt_log.setPlainText(backend.log_tail(25))
+
+    def _update_banner(self, s, driver_ok):
+        """Show the top banner only when the driver needs an action.
+
+        This exists because the fix button lives at the bottom of a scroll
+        area - a disabled driver would otherwise hide its own remedy.
+        """
+        orphans = s.get("orphan_entries") or []
+        vd = s["virtual_displays"]
+
+        if not driver_ok:
+            self.banner_text.setText(
+                "Parsec 适配器当前处于「已禁用」状态，虚拟屏无法工作。"
+                "点右侧按钮即可重新启用（会弹 UAC，需管理员）。")
+            self.banner_btn.setText("重新启用适配器")
+            self.banner.setVisible(True)
+        elif orphans and not vd:
+            self.banner_text.setText(
+                "检测到 %d 个残留虚拟显示器条目占着驱动插槽，新显示器建不起来。"
+                "点右侧按钮重置驱动（会自动验证，不用重启电脑）。" % len(orphans))
+            self.banner_btn.setText("重置驱动")
+            self.banner.setVisible(True)
+        else:
+            self.banner.setVisible(False)
 
     def _switch(self, btn):
         mode = [k for k, v in self.seg_btns.items() if v is btn][0]
