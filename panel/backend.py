@@ -241,30 +241,50 @@ def doctor():
 
 
 def reset_driver():
-    """disable -> enable the adapter (clears the polluted slot table), then start."""
-    steps = []
-    _ka("stop")
-    steps.append("stopped daemon")
-    rc, out, _ = _run(["pnputil", "/disable-device", DEVICE_ID], timeout=60)
-    steps.append("disable: " + ("ok" if rc == 0 else "rc=%d" % rc))
+    """Bring the Parsec adapter back from a wedged state.
+
+    Order matters, escalating: disable/enable restarts the UMDF host, and if
+    that is not enough a /restart-device cycle. Every stage is verified with
+    doctor() so the caller never sees a fake success.
+    """
     import time
-    time.sleep(3)
-    rc, out, _ = _run(["pnputil", "/enable-device", DEVICE_ID], timeout=60)
-    steps.append("enable: " + ("ok" if rc == 0 else "rc=%d" % rc))
-    time.sleep(5)
+    steps = []
 
-    # verify: can the driver create a display again?
+    _ka("stop")
+    steps.append("[1] daemon stopped")
+
+    def cycle(verb, settle):
+        rc, _o, e = _run(["pnputil", verb, DEVICE_ID], timeout=90)
+        steps.append("[%s] %s -> %s" % (verb, "ok" if rc == 0 else "rc=%d %s" % (rc, e.strip()[:60])))
+        time.sleep(settle)
+
+    # stage 1: disable then enable (restarts the user-mode driver host)
+    cycle("/disable-device", 4)
+    cycle("/enable-device", 8)
     d = doctor()
-    steps.append("doctor: " + (d["verdict"] or "no verdict"))
-    if d["wedged"]:
-        return {"ok": False, "out": "\n".join(steps),
-                "error": "driver still wedged after reset - a reboot is required"}
-    if not d["ok"]:
-        return {"ok": False, "out": "\n".join(steps), "error": d["error"] or "doctor failed"}
+    steps.append("    doctor: " + d["verdict"])
+    if not d["wedged"]:
+        rc, _, err = _ka("start")
+        steps.append("[+] daemon started")
+        return {"ok": rc == 0, "out": "\n".join(steps), "error": err.strip()}
 
-    rc, out, err = _ka("start")
-    steps.append("daemon started")
-    return {"ok": rc == 0, "out": "\n".join(steps), "error": err.strip()}
+    # stage 2: full device restart, sometimes recovers what disable/enable cannot
+    steps.append("[2] disable/enable was not enough, trying /restart-device")
+    cycle("/restart-device", 8)
+    d = doctor()
+    steps.append("    doctor: " + d["verdict"])
+    if not d["wedged"]:
+        rc, _, err = _ka("start")
+        steps.append("[+] daemon started")
+        return {"ok": rc == 0, "out": "\n".join(steps), "error": err.strip()}
+
+    steps.append("[!] driver still wedged after both stages")
+    return {
+        "ok": False,
+        "out": "\n".join(steps),
+        "error": "驱动重置无效 —— 需要重启电脑。"
+                 "重启后先点「诊断驱动」确认，再点「启动」。",
+    }
 
 
 def autostart(install):
