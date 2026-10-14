@@ -47,6 +47,7 @@ _diag_*.txt
 _diag_*.log
 _*.txt
 _*.png
+_*.py
 
 # ---- vendored third-party driver binaries ----
 # MttVDD is a third-party signed driver. The binaries (dll/cat/devcon) are
