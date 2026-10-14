@@ -10,8 +10,8 @@ vdd_core.py from the project root - the panel holds no logic of its own.
 
 import sys
 
-from PySide6.QtCore import (QThread, QPropertyAnimation, QEasingCurve, Qt,
-                            Signal, QObject)
+from PySide6.QtCore import (QThread, QTimer, QPropertyAnimation, QEasingCurve,
+                            Qt, Signal, QObject)
 from PySide6.QtGui import QColor, QPainter, QBrush
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -55,6 +55,9 @@ QLabel#Key   { font-size: 11.5px; color: %(muted)s; }
 QLabel#Value { font-size: 11.5px; color: %(text)s; font-weight: 500; }
 QLabel#Pill  { font-size: 11px; font-weight: 600; padding: 2px 10px;
                border-radius: 9px; background-color: #1e232c; }
+QLabel#Badge { font-size: 10px; font-weight: 600; color: %(accent)s;
+               background-color: %(accent_dim)s; border-radius: 7px;
+               padding: 1px 7px; }
 
 QFrame#Card     { background-color: %(card)s; border: 1px solid %(border)s; border-radius: 12px; }
 QFrame#CardWarn { background-color: %(card)s; border: 1px solid %(danger_dim)s; border-radius: 12px; }
@@ -102,13 +105,16 @@ QComboBox QAbstractItemView {
 
 QSpinBox {
     background-color: #1f242e; border: 1px solid %(border)s; border-radius: 8px;
-    color: %(text)s; padding: 5px 8px; font-size: 12px; min-width: 58px;
+    color: %(text)s; padding: 5px 8px; font-size: 12px;
+    min-width: 52px; max-width: 86px;
 }
 QSpinBox:focus { border-color: %(accent)s; }
 QSpinBox::up-button, QSpinBox::down-button { width: 0; border: none; }
 
 QScrollArea { border: none; background: transparent; }
-QScrollArea > QWidget > QWidget { background: transparent; }
+QScrollArea#Scroll, QScrollArea#Scroll > QWidget { background: transparent; }
+QWidget#Body { background: transparent; }
+QWidget#Row  { background: transparent; }
 QScrollBar:vertical   { background: transparent; width: 10px; margin: 3px; }
 QScrollBar::handle:vertical { background: #2f3641; border-radius: 5px; min-height: 32px; }
 QScrollBar::handle:vertical:hover { background: #414b59; }
@@ -173,18 +179,58 @@ class Dot(QWidget):
 
 
 def dark_chrome(widget):
-    """Dark title bar + Win11 rounded corners. Without this the window frame
-    keeps the Windows accent colour, which clashes with a dark app."""
+    """Dark title bar + Win11 rounded corners.
+
+    argtypes must be declared: without them ctypes marshals the HWND as a
+    32-bit C int, which truncates a 64-bit handle and makes the call fail
+    silently - the frame then keeps the Windows accent colour (green here).
+    """
     try:
         import ctypes
-        hwnd = int(widget.winId())
+        from ctypes import wintypes
+
         dwm = ctypes.windll.dwmapi
+        dwm.DwmSetWindowAttribute.argtypes = [
+            wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+        dwm.DwmSetWindowAttribute.restype = ctypes.c_long
+
+        hwnd = wintypes.HWND(int(widget.winId()))
         yes = ctypes.c_int(1)
+        # DWMWA_USE_DARK_MODE = 20  (Win10 20H1+ / Win11)
         dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(yes), ctypes.sizeof(yes))
+        # DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2  (Win11 only)
         rnd = ctypes.c_int(2)
         dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(rnd), ctypes.sizeof(rnd))
     except Exception:                                          # noqa: BLE001
         pass
+
+
+class ArrowCombo(QComboBox):
+    """QComboBox that paints its own chevron.
+
+    Qt's QSS box model does not render a border-triangle for ::down-arrow
+    (the `width:0;height:0;border-top:` trick is a browser thing), and the
+    native arrow is near-invisible on a dark theme. Painting it directly is
+    the only reliable way.
+    """
+
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        from PySide6.QtGui import QPen
+        from PySide6.QtCore import QPointF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        col = QColor(C["text"]) if self.underMouse() else QColor(C["muted"])
+        pen = QPen(col, 1.6)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+        cx = self.width() - 15
+        cy = self.height() / 2 - 1
+        p.drawPolyline([QPointF(cx - 3.5, cy - 2),
+                        QPointF(cx, cy + 2),
+                        QPointF(cx + 3.5, cy - 2)])
+        p.end()
 
 
 def card(title=None, warn=False):
@@ -202,6 +248,7 @@ def card(title=None, warn=False):
 
 def kv_row(key):
     w = QWidget()
+    w.setObjectName("Row")
     h = QHBoxLayout(w)
     h.setContentsMargins(0, 0, 0, 0)
     h.setSpacing(8)
@@ -214,6 +261,12 @@ def kv_row(key):
     h.addStretch(1)
     h.addWidget(v)
     return w, v
+
+
+def friendly_device(name):
+    """'\\\\.\\DISPLAY91' -> 'DISPLAY91'. The escaped form is what the Win32
+    API returns but it reads like a typo in the UI."""
+    return (name or "").replace("\\\\.\\", "").replace("\\\\?\\", "")
 
 
 class Worker(QObject):
@@ -247,6 +300,7 @@ class ActionThread(QThread):
 class Main(QWidget):
     def __init__(self):
         super().__init__()
+        self.setObjectName("Root")          # required by the QWidget#Root rule
         self.setWindowTitle(APP_NAME)
         self.setMinimumWidth(620)
         self.setMinimumHeight(720)
@@ -258,6 +312,9 @@ class Main(QWidget):
     def showEvent(self, ev):
         super().showEvent(ev)
         dark_chrome(self)
+        # the frame is not fully created during the first showEvent on some
+        # systems, so re-apply once the event loop has spun
+        QTimer.singleShot(80, lambda: dark_chrome(self))
 
     # ---------------- construction ----------------
 
@@ -299,10 +356,12 @@ class Main(QWidget):
         root.addWidget(self.banner)
 
         scroll = QScrollArea()
+        scroll.setObjectName("Scroll")
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setFrameShape(QFrame.NoFrame)
         body = QWidget()
+        body.setObjectName("Body")
         bl2 = QVBoxLayout(body)
         bl2.setContentsMargins(0, 0, 0, 0)
         bl2.setSpacing(12)
@@ -327,7 +386,7 @@ class Main(QWidget):
         l2.addWidget(h)
         r = QHBoxLayout()
         r.setSpacing(8)
-        self.cmb_mode = QComboBox()
+        self.cmb_mode = ArrowCombo()
         r.addWidget(self.cmb_mode, 1)
         self.btn_apply = QPushButton("应用")
         self.btn_apply.setObjectName("Primary")
@@ -487,7 +546,8 @@ class Main(QWidget):
 
         if vd:
             self.val_virt.setText("%s · %dx%d @ %dHz"
-                                  % (vd["device"], vd["width"], vd["height"], vd["hz"]))
+                                  % (friendly_device(vd["device"]),
+                                     vd["width"], vd["height"], vd["hz"]))
             self.val_virt.setStyleSheet("font-size:11.5px;font-weight:600;color:%s;"
                                         % C["success"])
         else:
@@ -570,17 +630,27 @@ class Main(QWidget):
             w = item.widget()
             if w:
                 w.deleteLater()
+
+        vd = self._st.get("virtual") or {}
+        current = (vd.get("width"), vd.get("height"), vd.get("hz"))
+
         for m in resolutions:
             row = QWidget()
+            row.setObjectName("Row")
             h = QHBoxLayout(row)
             h.setContentsMargins(0, 0, 0, 0)
             h.setSpacing(8)
             lab = QLabel("%dx%d @ %dHz" % m)
             lab.setObjectName("Value")
             h.addWidget(lab)
+            if m == current:
+                badge = QLabel("使用中")
+                badge.setObjectName("Badge")
+                h.addWidget(badge)
             h.addStretch(1)
             btn = QPushButton("移除")
             btn.setObjectName("MiniDanger")
+            btn.setEnabled(len(resolutions) > 1)
             btn.clicked.connect(lambda _=False, mm=m: self._remove_res(mm))
             h.addWidget(btn)
             self.res_box.addWidget(row)
