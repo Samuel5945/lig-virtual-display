@@ -269,6 +269,35 @@ class TitleBar(QWidget):
             self._win.showMaximized()
 
 
+def apply_dark_palette(app):
+    """Give Qt a dark palette.
+
+    QSS alone is not enough. Widgets that render through their palette keep the
+    system colours, and this machine's are the light defaults: Text/WindowText
+    #000000 and Highlight #779c48 (the Windows accent). That is why the
+    QSpinBox numbers showed up black despite `QSpinBox { color: ... }` in the
+    stylesheet, and why the combo drop-down highlighted items in green.
+    """
+    from PySide6.QtGui import QPalette
+    p = QPalette()
+    p.setColor(QPalette.Window, QColor(C["bg"]))
+    p.setColor(QPalette.WindowText, QColor(C["text"]))
+    p.setColor(QPalette.Base, QColor("#1f242e"))
+    p.setColor(QPalette.AlternateBase, QColor(C["card"]))
+    p.setColor(QPalette.Text, QColor(C["text"]))
+    p.setColor(QPalette.Button, QColor("#1f242e"))
+    p.setColor(QPalette.ButtonText, QColor(C["text"]))
+    p.setColor(QPalette.BrightText, QColor("#ffffff"))
+    p.setColor(QPalette.ToolTipBase, QColor("#1f242e"))
+    p.setColor(QPalette.ToolTipText, QColor(C["text"]))
+    p.setColor(QPalette.Highlight, QColor(C["accent_dim"]))
+    p.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+    p.setColor(QPalette.Link, QColor(C["accent"]))
+    for role in (QPalette.Text, QPalette.ButtonText, QPalette.WindowText):
+        p.setColor(QPalette.Disabled, role, QColor(C["faint"]))
+    app.setPalette(p)
+
+
 def dark_chrome(widget):
     """Kept only for the Win11 rounded-corner preference.
 
@@ -454,11 +483,13 @@ class Main(QWidget):
         bl2.addWidget(c1)
 
         # ---- active mode ----
-        c2, l2 = card("当前模式")
-        h = QLabel("改变虚拟屏实际使用哪一个模式。只影响虚拟屏，物理屏不受影响。")
-        h.setObjectName("Hint")
-        h.setWordWrap(True)
-        l2.addWidget(h)
+        c2, l2 = card("虚拟屏分辨率（现在用哪个）")
+        self.lbl_mode_hint = QLabel(
+            "从驱动提供的模式里选一个，虚拟屏立即切过去，不需要重载驱动。\n"
+            "只影响虚拟屏，物理显示器不受影响。")
+        self.lbl_mode_hint.setObjectName("Hint")
+        self.lbl_mode_hint.setWordWrap(True)
+        l2.addWidget(self.lbl_mode_hint)
         r = QHBoxLayout()
         r.setSpacing(8)
         self.cmb_mode = QComboBox()
@@ -470,12 +501,11 @@ class Main(QWidget):
         bl2.addWidget(c2)
 
         # ---- config ----
-        c3, l3 = card("配置")
-        h3 = QLabel("决定驱动提供几块虚拟屏、对外提供哪些分辨率。"
-                    "改动需要重载驱动才生效。")
-        h3.setObjectName("Hint")
-        h3.setWordWrap(True)
-        l3.addWidget(h3)
+        c3, l3 = card("驱动配置（驱动提供什么）")
+        self.lbl_cfg_hint = QLabel("")
+        self.lbl_cfg_hint.setObjectName("Hint")
+        self.lbl_cfg_hint.setWordWrap(True)
+        l3.addWidget(self.lbl_cfg_hint)
 
         rc = QHBoxLayout()
         rc.setSpacing(8)
@@ -509,7 +539,7 @@ class Main(QWidget):
         l3.addLayout(ra)
 
         rr = QHBoxLayout()
-        self.btn_reload = QPushButton("重载驱动（需管理员）")
+        self.btn_reload = QPushButton("重载驱动，让上面的改动生效")
         self.btn_reload.setObjectName("Danger")
         rr.addWidget(self.btn_reload)
         rr.addStretch(1)
@@ -686,11 +716,42 @@ class Main(QWidget):
         self.cmb_mode.blockSignals(False)
         self.btn_apply.setEnabled(bool(s.get("modes")))
 
+        # keep both hints honest about the live state, so the two cards are
+        # self-explanatory instead of leaving the user to work out which one
+        # needs a driver reload and which takes effect immediately
+        if s.get("modes"):
+            self.lbl_mode_hint.setText(
+                "\u3000\u3000从下面 %d 个模式里挑一个，虚拟屏立即切过去，"
+                "不需要重载驱动，也不影响物理显示器。" % len(s["modes"]))
+        else:
+            self.lbl_mode_hint.setText(
+                "\u3000\u3000驱动已安装但没检测到虚拟屏，暂时没有可选模式。"
+                "先到下面的「驱动配置」确认设置，再重载驱动。")
+
         if cfg:
             self.spn_count.blockSignals(True)
             self.spn_count.setValue(cfg["count"])
             self.spn_count.blockSignals(False)
             self._rebuild_res_rows(cfg["resolutions"])
+
+            actual = s.get("virtual_count", 0)
+            if cfg["count"] != actual:
+                self.lbl_cfg_hint.setText(
+                    "\u3000\u3000改动还没生效：配置里是 %d 块虚拟屏，实际有 %d 块。"
+                    "点下面对应的按钮重载驱动。" % (cfg["count"], actual))
+                self.lbl_cfg_hint.setStyleSheet(
+                    "font-size:11px;color:%s;font-weight:600;" % C["warning"])
+            else:
+                self.lbl_cfg_hint.setText(
+                    "\u3000\u3000决定驱动提供几块虚拟屏、以及可选哪些分辨率。"
+                    "这里的改动不会立即生效，改完必须重载驱动。")
+                self.lbl_cfg_hint.setStyleSheet(
+                    "font-size:11px;color:%s;" % C["muted"])
+        else:
+            self.lbl_cfg_hint.setText(
+                "\u3000\u3000读不到配置文件：%s" % (s.get("config_error") or "未知原因"))
+            self.lbl_cfg_hint.setStyleSheet(
+                "font-size:11px;color:%s;" % C["danger"])
 
     def _show_banner(self, mode, text, btn_label):
         self._st["_banner_mode"] = mode
@@ -768,6 +829,8 @@ def selftest():
     try:
         from PySide6.QtWidgets import QApplication
         app = QApplication.instance() or QApplication([])
+        apply_dark_palette(app)
+        app.setStyleSheet(STYLE)
         w = Main()
         print("  Main() constructed OK, %dx%d" % (w.width(), w.height()))
         print("  mode combo items:", w.cmb_mode.count())
@@ -788,6 +851,7 @@ def main():
     if "--selftest" in sys.argv:
         return selftest()
     app = QApplication(sys.argv)
+    apply_dark_palette(app)
     app.setStyleSheet(STYLE)
     w = Main()
     w.show()
