@@ -41,3 +41,7 @@ desktop.ini
 *.bak-*
 *.old
 *~
+
+# ---- scratch diagnostics (engine/panel write these while investigating) ----
+_diag_*.txt
+_diag_*.log
