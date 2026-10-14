@@ -16,15 +16,62 @@
 # -> 91). Feeding a display name would fail the mapping and silently fall back
 # to the default display. The only way to learn the id is to read Sunshine's
 # own "Currently available display devices" list, which it writes to the log
-# at startup - hence the restart.
+# at startup.
+#
+# Restarting Sunshine needs admin, so this script is run elevated. The
+# service restart proved unreliable through the API (one run left the app
+# untouched), so the script asks the user to do it manually and simply waits
+# for the fresh device list to appear - that signal cannot lie.
 
 $ErrorActionPreference = 'Stop'
 $cfgDir = 'C:\Program Files\Sunshine\config'
 $conf   = Join-Path $cfgDir 'sunshine.conf'
 $log    = Join-Path $cfgDir 'sunshine.log'
 $svc    = 'SunshineService'
+$MARK   = 'Currently available display devices:'
 
 function Say($t) { Write-Host $t }
+
+function BlockCount {
+    try {
+        ([regex]::Matches((Get-Content -LiteralPath $log -Raw), [regex]::Escape($MARK))).Count
+    } catch { 0 }
+}
+
+function Wait-FreshList {
+    param([int]$Before, [int]$Seconds = 120)
+    Say '      waiting for a fresh device list in the log ...'
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 2
+        if ((BlockCount) -gt $Before) { return $true }
+    }
+    return $false
+}
+
+function Ask-ManualRestart {
+    Say ''
+    Say '  >>> Please restart Sunshine by hand now:'
+    Say '        right-click the Sunshine tray icon  ->  Quit'
+    Say '        then start Sunshine again from the Start menu'
+    Say '      (a Moonlight client will be dropped; that is expected)'
+    Read-Host '  Press Enter once Sunshine is running again'
+    if (-not (Wait-FreshList -Before (BlockCount) -Seconds 120)) {
+        Say '      still no fresh device list - giving up.'
+        exit 4
+    }
+}
+
+function Try-ServiceRestart {
+    Say '      trying Restart-Service ...'
+    try {
+        Restart-Service -Name $svc -Force -ErrorAction Stop
+        return $true
+    } catch {
+        Say ('      Restart-Service failed: ' + $_.Exception.Message)
+        return $false
+    }
+}
 
 Say '================================================================'
 Say '  Sunshine + MttVDD virtual display  -  setup'
@@ -35,26 +82,23 @@ Say ''
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $bak = "$conf.bak-vdd-$stamp"
 Copy-Item -LiteralPath $conf -Destination $bak -Force
-Say "[1/5] config backed up -> $(Split-Path $bak -Leaf)"
+Say "[1/4] config backed up -> $(Split-Path $bak -Leaf)"
 
-# ---- 2. restart so the log lists the CURRENT displays -------------------
-Say "[2/5] restarting $svc ..."
-Restart-Service -Name $svc -Force -ErrorAction Stop
+# ---- 2. get a fresh display list ---------------------------------------
+$before = BlockCount
+Say "[2/4] need a fresh device list from the log (current: $before)"
 
-Say '      waiting for Sunshine to publish its display list ...'
-$block = $null
-$deadline = (Get-Date).AddSeconds(90)
-while ((Get-Date) -lt $deadline) {
-    Start-Sleep -Seconds 2
-    if (-not (Test-Path -LiteralPath $log)) { continue }
-    $txt = Get-Content -LiteralPath $log -Raw
-    $all = [regex]::Matches($txt, 'Currently available display devices:\s*(\[.*?\n\])', 'Singleline')
-    if ($all.Count -gt 0) { $block = $all[$all.Count - 1].Groups[1].Value; break }
-}
-if (-not $block) { Say '      FAILED: no display list in the log'; exit 2 }
+$ok = $false
+if (Try-ServiceRestart) { $ok = Wait-FreshList -Before $before }
+if (-not $ok) { Ask-ManualRestart }
+Say '      fresh device list found.'
 
+# ---- 3. parse it and write the config ----------------------------------
+$txt = Get-Content -LiteralPath $log -Raw
+$all = [regex]::Matches($txt, [regex]::Escape($MARK) + '\s*(\[.*?\n\])', 'Singleline')
+$block = $all[$all.Count - 1].Groups[1].Value
 $devices = @($block | ConvertFrom-Json)
-Say ("      got {0} display(s)" -f $devices.Count)
+Say ("      {0} display(s) in the latest list" -f $devices.Count)
 foreach ($d in $devices) {
     $edid = $d.edid
     Say ("        - {0}  {1}  [{2}/{3}]" -f $d.display_name, $d.friendly_name,
@@ -62,7 +106,6 @@ foreach ($d in $devices) {
          $d.device_id)
 }
 
-# ---- 3. find the virtual display ---------------------------------------
 # MttVDD reports itself with EDID manufacturer "MTT" (product 1337) and the
 # friendly name "VDD by MTT", so match on either.
 $vd = @($devices | Where-Object {
@@ -77,9 +120,8 @@ if (-not $vd) {
     exit 3
 }
 Say ''
-Say "[3/5] virtual display found: $($vd.friendly_name)  $($vd.device_id)"
+Say "[3/4] virtual display found: $($vd.friendly_name)  $($vd.device_id)"
 
-# ---- 4. write the config ------------------------------------------------
 $lines = Get-Content -LiteralPath $conf
 # Only these two. Everything else is left exactly as it was: the default
 # revert behaviour already restores the display when the last session ends,
@@ -105,18 +147,15 @@ foreach ($k in $want.Keys) {
     if (-not $seen.ContainsKey($k)) { $out += "$k = $($want[$k])" }
 }
 
-# keep the original encoding (the file ships with a BOM)
 $utf8bom = New-Object System.Text.UTF8Encoding $true
 [System.IO.File]::WriteAllLines($conf, [string[]]$out, $utf8bom)
-Say "[4/5] config updated:"
+Say '      config updated:'
 Say "        output_name = $($vd.device_id)"
 Say '        dd_configuration_option = ensure_only_display'
-Say '        dd_config_revert_on_disconnect = enabled'
 
-# ---- 5. restart to apply ------------------------------------------------
-Say "[5/5] restarting $svc to apply ..."
-Restart-Service -Name $svc -Force -ErrorAction Stop
-Start-Sleep -Seconds 5
+# ---- 4. restart to apply -----------------------------------------------
+Say "[4/4] restart Sunshine once more to apply."
+if (-not (Try-ServiceRestart)) { Ask-ManualRestart }
 
 Say ''
 Say '----------------------------------------------------------------'
