@@ -55,6 +55,11 @@ _*.py
 #   https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/tag/25.7.23
 #   -> VirtualDisplayDriver-x86.Driver.Only.zip  and  VDD.Control.25.7.23.zip
 # Only the INF (documentation) and our config XML are tracked.
+# ---- release output (build artifact; regenerate with make-release.py) ----
+# The MttVDD binaries it copies in are third-party and follow the same policy
+# as driver/ above: not committed.
+release/
+
 driver/*.exe
 driver/*.dll
 driver/*.cat
