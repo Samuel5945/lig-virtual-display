@@ -45,3 +45,16 @@ desktop.ini
 # ---- scratch diagnostics (engine/panel write these while investigating) ----
 _diag_*.txt
 _diag_*.log
+_*.txt
+
+# ---- vendored third-party driver binaries ----
+# MttVDD is a third-party signed driver. The binaries (dll/cat/devcon) are
+# deliberately NOT committed - fetch them from the release page instead:
+#   https://github.com/VirtualDrivers/Virtual-Display-Driver/releases/tag/25.7.23
+#   -> VirtualDisplayDriver-x86.Driver.Only.zip  and  VDD.Control.25.7.23.zip
+# Only the INF (documentation) and our config XML are tracked.
+driver/*.exe
+driver/*.dll
+driver/*.cat
+driver/*.sys
+driver/*.zip
