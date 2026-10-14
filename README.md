@@ -4,10 +4,20 @@
 
 ---
 
+## 相关文档
+
+| 文档 | 内容 |
+|---|---|
+| [`docs/Sunshine-Moonlight 配置指南.md`](docs/Sunshine-Moonlight%20配置指南.md) | 整套 Sunshine + Moonlight 串流的配置与排查记录（两页机器、跨网通道、显示模式不还原、笔记本 VDD 方案等）。虚拟屏只是其中第 8、11 章 |
+
+---
+
 ## 目录结构
 
 ```
 C:\VirtualDisplay\
+├─ docs\                      相关文档
+│  └─ Sunshine-Moonlight 配置指南.md
 ├─ vdd.ps1                    引擎控制脚本（CLI，被 GUI 和脚本共用）
 ├─ vdd-keepalive.py           保活引擎（自带 self-heal）
 ├─ vdd-switch.py              显示器切换逻辑
