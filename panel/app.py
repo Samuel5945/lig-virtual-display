@@ -435,17 +435,24 @@ class Main(QWidget):
 
         # ---- danger card ----
         c5, c5l = card("驱动重置", danger=True)
-        d1 = QLabel("虚拟屏建不起来、出现一堆 DISPLAY6~21 幽灵条目时用。"
-                    "会禁用再启用 Parsec 适配器以清空驱动槽位表，不需要重启电脑。")
+        d1 = QLabel("虚拟屏建不起来、出现一堆 DISPLAY38~53 幽灵条目时用。"
+                    "会禁用再启用 Parsec 适配器以清空驱动槽位表，并自动验证结果，不需要重启电脑。")
         d1.setObjectName("Hint")
         d1.setWordWrap(True)
         c5l.addWidget(d1)
         r6 = QHBoxLayout()
         self.btn_reset = QPushButton("重置驱动并启动")
         self.btn_reset.setObjectName("Danger")
+        self.btn_doctor = QPushButton("诊断驱动")
         r6.addWidget(self.btn_reset)
+        r6.addWidget(self.btn_doctor)
         r6.addStretch(1)
         c5l.addLayout(r6)
+        self.lbl_verdict = QLabel("")
+        self.lbl_verdict.setObjectName("Hint")
+        self.lbl_verdict.setWordWrap(True)
+        self.lbl_verdict.setVisible(False)
+        c5l.addWidget(self.lbl_verdict)
         bl.addWidget(c5)
 
         # ---- log ----
@@ -468,6 +475,7 @@ class Main(QWidget):
         self.btn_clean.clicked.connect(lambda: self._act(backend.clean))
         self.btn_auto.clicked.connect(self._apply_autostart)
         self.btn_reset.clicked.connect(self._reset)
+        self.btn_doctor.clicked.connect(self._doctor)
         self.seg_group.buttonClicked.connect(self._switch)
         self.chk_follow.stateChanged.connect(self._follow_changed)
 
@@ -486,11 +494,30 @@ class Main(QWidget):
         t.start()
 
     def _after(self, thread, res):
+        # surface a verdict line for the driver card
+        if isinstance(res, dict) and "wedged" in res:
+            if res.get("wedged"):
+                self._show_verdict(
+                    "驱动卡死：能接受指令但不创建显示器。"
+                    "请先点「重置驱动并启动」；若仍卡死则需重启电脑。", C["danger"])
+            elif res.get("healthy"):
+                self._show_verdict("驱动正常 ✓", C["success"])
+            elif res.get("not_attached"):
+                self._show_verdict(
+                    "驱动正常，显示器已创建但未挂到桌面 —— 用上面的「仅虚拟」切换接上。",
+                    C["warning"])
+            else:
+                self._show_verdict(res.get("verdict") or "诊断完成", C["muted"])
+        elif isinstance(res, dict) and not res.get("ok") and res.get("error"):
+            self._show_verdict("失败：" + res["error"], C["danger"])
+
         if res.get("ok"):
             self.txt_log.setPlainText(backend.log_tail(30))
         else:
+            detail = res.get("out") or ""
             self.txt_log.setPlainText(
-                "ERROR: %s\n\n%s" % (res.get("error", ""), backend.log_tail(30)))
+                "ERROR: %s\n\n%s\n\n%s"
+                % (res.get("error", ""), detail, backend.log_tail(20)))
         self.reload_status()
 
     def _set_busy(self, busy):
@@ -629,7 +656,18 @@ class Main(QWidget):
             if not backend.elevate_and_rerun():
                 self.txt_log.setPlainText("需要管理员权限，UAC 已取消")
             return
+        self._show_verdict("重置中… 停保活 → 禁用适配器 → 启用 → 诊断验证", C["muted"])
         self._act(backend.reset_driver)
+
+    def _doctor(self):
+        self._show_verdict("诊断中…", C["muted"])
+        self._act(backend.doctor)
+
+    def _show_verdict(self, text, color):
+        self.lbl_verdict.setText(text)
+        self.lbl_verdict.setStyleSheet(
+            "font-size:11px;color:%s;font-weight:500;" % color)
+        self.lbl_verdict.setVisible(True)
 
 
 # --------------------------------------------------------------------------- #

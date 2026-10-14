@@ -1,0 +1,31 @@
+=== Parsec 驱动注册表排查 2026-10-14 10:24:51 ===
+--- 1. 设备实例的 Device Parameters ---
+  KEY: HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\ROOT\DISPLAY\0000\Device Parameters
+     VideoID = {59C67915-AE81-11F1-9B85-94BB43885A29}
+     AOCID = {59C67919-AE81-11F1-9B85-94BB43885A29}
+  KEY: HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\ROOT\DISPLAY\0000\Device Parameters\WUDF
+     DeviceGroupId = ParsecDriverGroup
+     HostProcessSharingEnabled = 0
+     KernelModeClientPolicy = 1
+     DriverList = ParsecVDA
+  KEY: HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Enum\ROOT\DISPLAY\0000\Device Parameters\WUDFDiagnosticInfo
+     LifetimeID = e0d325ff-fc01-4b0f-a5d1-301abce81c0b
+     HostPid = 28908
+     RetrievalMode = 1
+     RwTransferMode = 0
+     IoctlTransferMode = 0
+--- 2. 驱动服务键 ---
+--- 3. 所有含 vdd/parsec 的服务 ---
+  BasicDisplay
+  DisplayEnhancementService
+--- 4. 已安装的显示类驱动包 ---
+
+  发布名称:     oem67.inf
+  原始名称:      mm.inf
+> 提供程序名称:      Parsec Cloud, Inc.
+  类名:         显示适配器
+  类 GUID:         {4d36e968-e325-11ce-bfc1-08002be10318}
+  类版本:      2.0
+  驱动程序版本:     01/25/2024 0.45.0.0
+
+

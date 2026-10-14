@@ -421,6 +421,70 @@ def apply_resolution(resolution, logf=None):
     return False
 
 
+def do_doctor():
+    """主动探测驱动是否还能工作（不只是"能打开"）。
+
+    2026-10-14 的故障是：IOCTL_ADD 返回 err=0 看着成功，
+    但监视器级枚举 0 个对象 —— 驱动收指令却不干活。
+    只有真去试一次 ADD 并检查监视器对象，才能区分
+    「没挂载」和「驱动卡死」。会留下一个条目，跑完自动尝试清理。"""
+    print("=== driver doctor ===")
+    path, h = find_device_path()
+    print("device path      :", path)
+    if not h:
+        print("verdict          : DRIVER NOT REACHABLE")
+        return 1
+
+    ver, err = ioctl(h, IOCTL_VERSION)
+    print("driver version   :", ver, "(err %s)" % err)
+
+    before = parsec_adapter_entries()
+    print("entries before   :", len(before))
+
+    idx, err = ioctl(h, IOCTL_ADD)
+    ioctl(h, IOCTL_UPDATE)
+    print("IOCTL_ADD        : index=%s err=%s" % (idx, err))
+    time.sleep(2)
+
+    # 监视器级枚举：这是"驱动有没有真干活"的唯一可信判据
+    mon = _enum_all_monitors(parsec_only=True)
+    att = attached_parsec()
+    after = parsec_adapter_entries()
+    print("monitor objects  :", len(mon), mon[:4])
+    print("attached desktop :", att)
+    print("entries after    :", len(after))
+
+    remove_index(h, 0)
+    time.sleep(0.8)
+    k32.CloseHandle(h)
+    time.sleep(0.5)
+    final = len(parsec_adapter_entries())
+    print("entries final    :", final)
+
+    print()
+    if err != 0:
+        print("verdict          : IOCTL_ADD FAILED (err=%s) - driver wedged" % err)
+        rc = 1
+    elif not mon:
+        print("verdict          : ** WEDGED ** the driver accepts ADD but creates")
+        print("                   no monitor object. Nothing user-space can do:")
+        print("                   disable/enable the adapter, or reboot.")
+        rc = 2
+    elif att == 0:
+        print("verdict          : driver OK, monitor exists but is not on the desktop")
+        print("                   -> run 'switch virtual' to attach it")
+        rc = 0
+    else:
+        print("verdict          : HEALTHY (%d virtual display(s) on the desktop)" % att)
+        rc = 0
+    return rc
+
+
+def _enum_all_monitors(parsec_only=False):
+    """监视器级的挂载列表（不看 StateFlags 之外的任何东西）。"""
+    return _enum_attached(parsec=parsec_only)
+
+
 def do_status():
     path, h = find_device_path()
     print("device path :", path)
@@ -728,6 +792,8 @@ def main():
 
     if mode in ("status", "-s"):
         return do_status()
+    if mode in ("doctor", "health"):
+        return do_doctor()
     if mode in ("stop", "off"):
         return do_stop()
     if mode in ("clean",):

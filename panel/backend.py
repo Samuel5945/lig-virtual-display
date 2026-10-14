@@ -204,13 +204,67 @@ def set_resolution(value):
     return {"ok": rc == 0, "out": out.strip(), "error": err.strip()}
 
 
+def doctor():
+    """Probe whether the driver can still create a display at all.
+
+    status() only proves the driver is *reachable*. This actually tries an ADD
+    and checks for a monitor object, which is the only way to tell "nothing is
+    mounted yet" apart from "the driver is wedged".
+    """
+    rc, out, err = _ka("doctor")
+    wedged = "WEDGED" in out
+    healthy = "HEALTHY" in out
+    not_attached = "not on the desktop" in out
+    add_failed = "IOCTL_ADD FAILED" in out
+
+    if wedged:
+        verdict = "驱动卡死：能接受指令但不创建显示器"
+    elif add_failed:
+        verdict = "IOCTL_ADD 失败"
+    elif healthy:
+        verdict = "驱动正常"
+    elif not_attached:
+        verdict = "显示器已创建，但未挂到桌面"
+    else:
+        verdict = "诊断未给出明确结论"
+
+    return {
+        "ok": rc == 0,
+        "rc": rc,
+        "wedged": wedged,
+        "healthy": healthy,
+        "not_attached": not_attached,
+        "verdict": verdict,
+        "out": out.strip(),
+        "error": err.strip(),
+    }
+
+
 def reset_driver():
     """disable -> enable the adapter (clears the polluted slot table), then start."""
+    steps = []
     _ka("stop")
-    _run(["pnputil", "/disable-device", DEVICE_ID], timeout=60)
-    _run(["pnputil", "/enable-device", DEVICE_ID], timeout=60)
+    steps.append("stopped daemon")
+    rc, out, _ = _run(["pnputil", "/disable-device", DEVICE_ID], timeout=60)
+    steps.append("disable: " + ("ok" if rc == 0 else "rc=%d" % rc))
+    import time
+    time.sleep(3)
+    rc, out, _ = _run(["pnputil", "/enable-device", DEVICE_ID], timeout=60)
+    steps.append("enable: " + ("ok" if rc == 0 else "rc=%d" % rc))
+    time.sleep(5)
+
+    # verify: can the driver create a display again?
+    d = doctor()
+    steps.append("doctor: " + (d["verdict"] or "no verdict"))
+    if d["wedged"]:
+        return {"ok": False, "out": "\n".join(steps),
+                "error": "driver still wedged after reset - a reboot is required"}
+    if not d["ok"]:
+        return {"ok": False, "out": "\n".join(steps), "error": d["error"] or "doctor failed"}
+
     rc, out, err = _ka("start")
-    return {"ok": rc == 0, "out": out.strip(), "error": err.strip()}
+    steps.append("daemon started")
+    return {"ok": rc == 0, "out": "\n".join(steps), "error": err.strip()}
 
 
 def autostart(install):
