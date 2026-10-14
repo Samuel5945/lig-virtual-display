@@ -15,15 +15,16 @@
         <g_refresh_rate>144</g_refresh_rate>
     </global>
     <resolutions>
-        <!-- 虚拟屏对外提供哪些模式；实际用哪个去 Windows 显示设置里选 -->
-        <resolution>
-            <width>1920</width>
-            <height>1080</height>
-            <refresh_rate>60</refresh_rate>
-        </resolution>
+        <!-- 虚拟屏对外提供哪些模式；实际用哪个去 Windows 显示设置里选。
+             实测：列表里排第一的会成为驱动默认启用的模式。 -->
         <resolution>
             <width>2560</width>
             <height>1440</height>
+            <refresh_rate>60</refresh_rate>
+        </resolution>
+        <resolution>
+            <width>1920</width>
+            <height>1080</height>
             <refresh_rate>60</refresh_rate>
         </resolution>
         <resolution>
