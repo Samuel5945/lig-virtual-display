@@ -41,14 +41,31 @@ RESOLUTIONS = [
 SWITCH_MODES = ["real", "virtual", "both", "toggle"]
 
 
+def _decode(raw):
+    """Decode subprocess output without ever raising.
+
+    pnputil and other console tools emit the OEM codepage (GBK on Chinese
+    Windows) while PowerShell leans UTF-8; guessing one encoding breaks the
+    other. Try in order and fall back to a lossy decode.
+    """
+    if not raw:
+        return ""
+    for enc in ("utf-8", "gbk", "cp936", "big5"):
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
 def _run(args, timeout=90):
     """Run a command, return (rc, stdout, stderr). Never raises."""
     try:
         p = subprocess.run(
-            args, capture_output=True, text=True, timeout=timeout,
+            args, capture_output=True, timeout=timeout,
             cwd=ROOT, creationflags=0x08000000,  # CREATE_NO_WINDOW
         )
-        return p.returncode, p.stdout or "", p.stderr or ""
+        return p.returncode, _decode(p.stdout), _decode(p.stderr)
     except subprocess.TimeoutExpired:
         return 124, "", "timeout after %ss" % timeout
     except Exception as exc:                                  # noqa: BLE001
@@ -240,51 +257,89 @@ def doctor():
     }
 
 
+def device_enabled():
+    """True if the Parsec adapter is currently started, None if unknowable."""
+    try:
+        rc, out, _ = _run(
+            ["pnputil", "/enum-devices", "/instanceid", DEVICE_ID], timeout=40)
+        if rc != 0:
+            return None
+        return ("\u5df2\u542f\u52a8" in out) or ("Started" in out)
+    except Exception:                                          # noqa: BLE001
+        return None
+
+
 def reset_driver():
     """Bring the Parsec adapter back from a wedged state.
 
-    Order matters, escalating: disable/enable restarts the UMDF host, and if
-    that is not enough a /restart-device cycle. Every stage is verified with
-    doctor() so the caller never sees a fake success.
+    Escalating order: disable/enable restarts the user-mode driver host, then
+    /restart-device as a second attempt. Every stage is verified with doctor()
+    so a fake success is impossible.
+
+    SAFETY: the whole body is wrapped so the adapter can never be left
+    disabled. A crash between disable and enable would otherwise strand the
+    device in the disabled state, which survives a reboot.
     """
     import time
     steps = []
 
-    _ka("stop")
-    steps.append("[1] daemon stopped")
-
-    def cycle(verb, settle):
+    def pnputil(verb, settle):
         rc, _o, e = _run(["pnputil", verb, DEVICE_ID], timeout=90)
-        steps.append("[%s] %s -> %s" % (verb, "ok" if rc == 0 else "rc=%d %s" % (rc, e.strip()[:60])))
+        # build the message in two steps: a %-format inside a conditional
+        # binds wrongly and only passes 2 args to 3 placeholders
+        if rc == 0:
+            detail = "ok"
+        else:
+            detail = "rc=%d %s" % (rc, (e or "").strip()[:70])
+        steps.append("[%s] %s" % (verb, detail))
         time.sleep(settle)
+        return rc
 
-    # stage 1: disable then enable (restarts the user-mode driver host)
-    cycle("/disable-device", 4)
-    cycle("/enable-device", 8)
-    d = doctor()
-    steps.append("    doctor: " + d["verdict"])
-    if not d["wedged"]:
-        rc, _, err = _ka("start")
-        steps.append("[+] daemon started")
-        return {"ok": rc == 0, "out": "\n".join(steps), "error": err.strip()}
+    def finish(ok, error=""):
+        return {"ok": ok, "out": "\n".join(steps), "error": error}
 
-    # stage 2: full device restart, sometimes recovers what disable/enable cannot
-    steps.append("[2] disable/enable was not enough, trying /restart-device")
-    cycle("/restart-device", 8)
-    d = doctor()
-    steps.append("    doctor: " + d["verdict"])
-    if not d["wedged"]:
-        rc, _, err = _ka("start")
-        steps.append("[+] daemon started")
-        return {"ok": rc == 0, "out": "\n".join(steps), "error": err.strip()}
+    try:
+        _ka("stop")
+        steps.append("[0] daemon stopped")
 
-    steps.append("[!] driver still wedged after both stages")
-    return {
-        "ok": False,
-        "out": "\n".join(steps),
-        "error": "驱动重置无效 —— 需要重启电脑。"
-                 "重启后先点「诊断驱动」确认，再点「启动」。",
-    }
+        # stage 1 - disable then enable, restarts the UMDF host
+        pnputil("/disable-device", 4)
+        pnputil("/enable-device", 8)
+        d = doctor()
+        steps.append("    doctor: " + d["verdict"])
+        if not d["wedged"]:
+            rc, _, err = _ka("start")
+            steps.append("[+] daemon started")
+            return finish(rc == 0, err.strip())
+
+        # stage 2 - full device restart
+        steps.append("[2] disable/enable not enough, trying /restart-device")
+        pnputil("/restart-device", 8)
+        d = doctor()
+        steps.append("    doctor: " + d["verdict"])
+        if not d["wedged"]:
+            rc, _, err = _ka("start")
+            steps.append("[+] daemon started")
+            return finish(rc == 0, err.strip())
+
+        steps.append("[!] driver still wedged after both stages")
+        return finish(False, "驱动重置无效 —— 需要重启电脑。"
+                             "先点「诊断驱动」确认，再点「启动」。")
+
+    except Exception as exc:                                  # noqa: BLE001
+        steps.append("[!] exception: %s" % exc)
+        return finish(False, "重置过程出错（%s）。适配器已自动恢复启用状态。" % exc)
+
+    finally:
+        # never leave the adapter disabled - a disabled PnP device survives reboot.
+        # fires on False (known disabled) AND on None (state unknowable): fail safe.
+        try:
+            if device_enabled() is not True:
+                steps.append("[!] safety net: adapter not confirmed enabled, re-enabling")
+                _run(["pnputil", "/enable-device", DEVICE_ID], timeout=90)
+                time.sleep(6)
+        except Exception:                                     # noqa: BLE001
+            pass
 
 
 def autostart(install):
