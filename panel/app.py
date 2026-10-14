@@ -761,6 +761,7 @@ def selftest():
         print("  %-16s %s" % (name, callable(getattr(backend, name, None))))
 
     print("\n-- ui import --")
+    ui_ok = False
     try:
         from PySide6.QtWidgets import QApplication
         app = QApplication.instance() or QApplication([])
@@ -768,12 +769,19 @@ def selftest():
         print("  Main() constructed OK, size %dx%d" % (w.width(), w.height()))
         print("  combobox items:", w.cmb_res.count())
         print("  segment modes :", list(w.seg_btns.keys()))
+        print("  alert banner  :", "present" if hasattr(w, "banner") else "MISSING")
+        ui_ok = True
     except Exception as exc:                                  # noqa: BLE001
         print("  UI FAIL:", exc)
 
-    ok = (s["ok"] and s["driver_version"] is not None)
-    print("\nRESULT =", "OK" if ok else "FAIL")
-    return 0 if ok else 1
+    # RESULT reflects the BUILD (code + UI), not the driver state - a disabled
+    # adapter is a real-world condition the panel is designed to report, and
+    # failing the whole selftest over it would be misleading.
+    driver_ok = s["ok"] and s["driver_version"] is not None
+    print("\nRESULT =", "OK" if ui_ok else "FAIL")
+    print("DRIVER =", "reachable (v%s)" % s["driver_version"] if driver_ok
+          else "unreachable - adapter may be disabled; use the reset button")
+    return 0 if ui_ok else 1
 
 
 def _now():
