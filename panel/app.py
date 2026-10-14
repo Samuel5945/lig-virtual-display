@@ -1,23 +1,21 @@
 """
-VirtualDisplay panel - modern Qt6 UI.
+VirtualDisplay panel - modern Qt6 UI for the MttVDD virtual display.
 
-Dark, card-based layout. Every action shells out to the proven engine scripts
-through backend.py; this file is presentation only.
+Dark, card-based. Every action goes through backend.py, which imports
+vdd_core.py from the project root - the panel holds no logic of its own.
 
-    VirtualDisplayPanel.exe            open the panel
-    VirtualDisplayPanel.exe --selftest run backend checks headless, print report
+    VirtualDisplayPanel.exe              open the panel
+    VirtualDisplayPanel.exe --selftest   headless check, prints a report
 """
 
-import os
 import sys
 
-from PySide6.QtCore import (QThread, QPropertyAnimation, QEasingCurve,
-                            QRect, Qt, Signal, QObject)
-from PySide6.QtGui import QColor, QPainter, QPen, QBrush
+from PySide6.QtCore import (QThread, QPropertyAnimation, QEasingCurve, Qt,
+                            Signal, QObject)
+from PySide6.QtGui import QColor, QPainter, QBrush
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QComboBox, QLineEdit, QButtonGroup, QCheckBox, QTextEdit,
-    QSizePolicy, QGraphicsDropShadowEffect, QScrollArea,
+    QFrame, QComboBox, QSpinBox, QScrollArea,
 )
 
 import backend
@@ -29,19 +27,18 @@ APP_NAME = "VirtualDisplay"
 # --------------------------------------------------------------------------- #
 
 C = {
-    "bg":          "#0f1115",
-    "card":        "#171a21",
-    "card_hover":  "#1c2029",
-    "border":      "#262b35",
-    "text":        "#e8ebf0",
-    "muted":       "#8b93a1",
-    "faint":       "#5c6472",
-    "accent":      "#4fd1c5",
-    "accent_dim":  "#2b6f68",
-    "success":     "#4ade80",
-    "warning":     "#fbbf24",
-    "danger":      "#f87171",
-    "danger_dim":  "#7a3030",
+    "bg":         "#0f1115",
+    "card":       "#171a21",
+    "border":     "#262b35",
+    "text":       "#e8ebf0",
+    "muted":      "#8b93a1",
+    "faint":      "#5c6472",
+    "accent":     "#4fd1c5",
+    "accent_dim": "#2b6f68",
+    "success":    "#4ade80",
+    "warning":    "#fbbf24",
+    "danger":     "#f87171",
+    "danger_dim": "#7a3030",
 }
 
 STYLE = """
@@ -51,7 +48,6 @@ QWidget#Root {
     font-size: 12px;
     color: %(text)s;
 }
-
 QLabel#Sub   { font-size: 11px; color: %(faint)s; }
 QLabel#SectionTitle { font-size: 12.5px; font-weight: 600; color: %(text)s; }
 QLabel#Hint  { font-size: 11px; color: %(muted)s; }
@@ -60,65 +56,42 @@ QLabel#Value { font-size: 11.5px; color: %(text)s; font-weight: 500; }
 QLabel#Pill  { font-size: 11px; font-weight: 600; padding: 2px 10px;
                border-radius: 9px; background-color: #1e232c; }
 
-QFrame#Card {
-    background-color: %(card)s;
-    border: 1px solid %(border)s;
-    border-radius: 12px;
-}
-QFrame#CardDanger { background-color: %(card)s; border: 1px solid %(danger_dim)s; border-radius: 12px; }
-
-QFrame#Banner {
-    background-color: #2a1b1b;
-    border: 1px solid %(danger_dim)s;
-    border-radius: 10px;
-}
+QFrame#Card     { background-color: %(card)s; border: 1px solid %(border)s; border-radius: 12px; }
+QFrame#CardWarn { background-color: %(card)s; border: 1px solid %(danger_dim)s; border-radius: 12px; }
+QFrame#Banner   { background-color: #2a1b1b; border: 1px solid %(danger_dim)s; border-radius: 10px; }
 QLabel#BannerText { color: #ffd9d9; font-size: 11.5px; }
-QPushButton#BannerBtn {
-    background-color: %(danger)s; border: 1px solid %(danger)s;
-    color: #2a0d0d; font-weight: 600; padding: 6px 14px; min-width: 0;
-}
-QPushButton#BannerBtn:hover { background-color: #ff9a9a; border-color: #ff9a9a; }
 
 QPushButton {
-    background-color: #1f242e;
-    border: 1px solid %(border)s;
-    border-radius: 8px;
-    color: %(text)s;
-    padding: 7px 14px;
-    font-size: 12px;
-    min-width: 68px;
+    background-color: #1f242e; border: 1px solid %(border)s; border-radius: 8px;
+    color: %(text)s; padding: 7px 14px; font-size: 12px; min-width: 64px;
 }
-QPushButton:hover  { background-color: #262c38; border-color: #333a47; }
-QPushButton:pressed{ background-color: #1a1f28; }
+QPushButton:hover   { background-color: #262c38; border-color: #333a47; }
+QPushButton:pressed { background-color: #1a1f28; }
 QPushButton:disabled{ color: %(faint)s; border-color: #22262f; background-color: #191d24; }
 
-QPushButton#Primary {
-    background-color: %(accent)s; border: 1px solid %(accent)s; color: #06231f; font-weight: 600;
-}
-QPushButton#Primary:hover  { background-color: #65ded3; border-color: #65ded3; }
-QPushButton#Primary:pressed{ background-color: #3fb9ad; border-color: #3fb9ad; }
+QPushButton#Primary { background-color: %(accent)s; border: 1px solid %(accent)s;
+                      color: #06231f; font-weight: 600; }
+QPushButton#Primary:hover   { background-color: #65ded3; border-color: #65ded3; }
 QPushButton#Primary:disabled{ background-color: #23343a; border-color: #23343a; color: #4a5a60; }
 
-QPushButton#Danger { background-color: #2a1c1c; border: 1px solid %(danger_dim)s; color: %(danger)s; }
+QPushButton#Danger  { background-color: #2a1c1c; border: 1px solid %(danger_dim)s; color: %(danger)s; }
 QPushButton#Danger:hover { background-color: #3a2222; border-color: #a04a4a; }
-
-QPushButton#Seg {
-    background-color: transparent; border: 1px solid %(border)s; color: %(muted)s;
-    border-radius: 7px; padding: 6px 10px; min-width: 52px; font-size: 11px;
-}
-QPushButton#Seg:hover { color: %(text)s; background-color: #1e232c; }
-QPushButton#Seg:checked { background-color: %(accent_dim)s; border-color: %(accent)s; color: #d7fbf6; font-weight: 600; }
+QPushButton#BannerBtn { background-color: %(danger)s; border: 1px solid %(danger)s;
+                        color: #2a0d0d; font-weight: 600; padding: 6px 14px; min-width: 0; }
+QPushButton#BannerBtn:hover { background-color: #ff9a9a; border-color: #ff9a9a; }
+QPushButton#MiniDanger { padding: 3px 9px; min-width: 0; font-size: 11px; border-radius: 6px;
+                         background-color: #2a1c1c; border: 1px solid %(danger_dim)s; color: %(danger)s; }
+QPushButton#MiniDanger:hover { background-color: #3a2222; }
 
 QComboBox {
     background-color: #1f242e; border: 1px solid %(border)s; border-radius: 8px;
-    color: %(text)s; padding: 6px 10px; min-width: 130px; font-size: 12px;
+    color: %(text)s; padding: 6px 10px; min-width: 150px; font-size: 12px;
 }
 QComboBox:hover { border-color: #333a47; }
 QComboBox::drop-down { border: none; width: 22px; }
 QComboBox::down-arrow {
     image: none; width: 0; height: 0;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
+    border-left: 4px solid transparent; border-right: 4px solid transparent;
     border-top: 5px solid %(muted)s;
 }
 QComboBox:hover::down-arrow { border-top-color: %(text)s; }
@@ -127,56 +100,40 @@ QComboBox QAbstractItemView {
     color: %(text)s; selection-background-color: %(accent_dim)s; padding: 4px;
 }
 
-QLineEdit {
+QSpinBox {
     background-color: #1f242e; border: 1px solid %(border)s; border-radius: 8px;
-    color: %(text)s; padding: 6px 10px; font-size: 12px;
+    color: %(text)s; padding: 5px 8px; font-size: 12px; min-width: 58px;
 }
-QLineEdit:focus { border-color: %(accent)s; }
+QSpinBox:focus { border-color: %(accent)s; }
+QSpinBox::up-button, QSpinBox::down-button { width: 0; border: none; }
 
-QCheckBox { color: %(text)s; font-size: 12px; spacing: 8px; }
-QCheckBox::indicator {
-    width: 15px; height: 15px; border-radius: 4px;
-    border: 1px solid %(border)s; background-color: #1f242e;
-}
-QCheckBox::indicator:checked { background-color: %(accent)s; border-color: %(accent)s; }
-
-QTextEdit#Log {
-    background-color: #10131a; border: 1px solid %(border)s; border-radius: 8px;
-    color: %(muted)s; font-family: "Cascadia Mono", "Consolas", monospace;
-    font-size: 10.5px; padding: 8px;
-}
 QScrollArea { border: none; background: transparent; }
 QScrollArea > QWidget > QWidget { background: transparent; }
-
 QScrollBar:vertical   { background: transparent; width: 10px; margin: 3px; }
-QScrollBar:horizontal { background: transparent; height: 10px; margin: 3px; }
-QScrollBar::handle:vertical   { background: #2f3641; border-radius: 5px; min-height: 32px; }
-QScrollBar::handle:horizontal { background: #2f3641; border-radius: 5px; min-width: 32px; }
-QScrollBar::handle:vertical:hover,
-QScrollBar::handle:horizontal:hover { background: #414b59; }
-QScrollBar::handle:pressed { background: #4a5563; }
+QScrollBar::handle:vertical { background: #2f3641; border-radius: 5px; min-height: 32px; }
+QScrollBar::handle:vertical:hover { background: #414b59; }
 QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; border: none; background: none; }
 QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
 """ % C
 
 
 # --------------------------------------------------------------------------- #
-# small widgets
+# helpers
 # --------------------------------------------------------------------------- #
 
 class Dot(QWidget):
-    """Status dot with a soft pulse when 'on'."""
+    """Status dot with a soft pulse when healthy."""
 
-    def __init__(self, on=False, color=None, size=9, parent=None):
+    def __init__(self, color=None, size=9, parent=None):
         super().__init__(parent)
-        self._on = on
+        self._on = False
         self._color = QColor(color or C["success"])
         self._size = size
+        self._opacity = 1.0
         self.setFixedSize(size + 8, size + 8)
         self._anim = None
 
-    def set_on(self, on, color=None):
-        self._on = on
+    def set_state(self, on, color=None):
         if color:
             self._color = QColor(color)
         if on and self._anim is None:
@@ -192,10 +149,11 @@ class Dot(QWidget):
             self._anim.stop()
             self._anim = None
             self._opacity = 1.0
+        self._on = on
         self.update()
 
     def get_opacity(self):
-        return getattr(self, "_opacity", 1.0)
+        return self._opacity
 
     def set_opacity(self, v):
         self._opacity = v
@@ -206,20 +164,32 @@ class Dot(QWidget):
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        op = getattr(self, "_opacity", 1.0)
         col = QColor(self._color)
-        col.setAlphaF(op if self._on else 0.35)
+        col.setAlphaF(self._opacity if self._on else 0.4)
         d = self._size
-        x = (self.width() - d) // 2
-        y = (self.height() - d) // 2
         p.setPen(Qt.NoPen)
         p.setBrush(QBrush(col))
-        p.drawEllipse(x, y, d, d)
+        p.drawEllipse((self.width() - d) // 2, (self.height() - d) // 2, d, d)
 
 
-def card(title=None, danger=False, parent=None):
-    f = QFrame(parent)
-    f.setObjectName("CardDanger" if danger else "Card")
+def dark_chrome(widget):
+    """Dark title bar + Win11 rounded corners. Without this the window frame
+    keeps the Windows accent colour, which clashes with a dark app."""
+    try:
+        import ctypes
+        hwnd = int(widget.winId())
+        dwm = ctypes.windll.dwmapi
+        yes = ctypes.c_int(1)
+        dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(yes), ctypes.sizeof(yes))
+        rnd = ctypes.c_int(2)
+        dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(rnd), ctypes.sizeof(rnd))
+    except Exception:                                          # noqa: BLE001
+        pass
+
+
+def card(title=None, warn=False):
+    f = QFrame()
+    f.setObjectName("CardWarn" if warn else "Card")
     lay = QVBoxLayout(f)
     lay.setContentsMargins(16, 14, 16, 14)
     lay.setSpacing(10)
@@ -230,14 +200,14 @@ def card(title=None, danger=False, parent=None):
     return f, lay
 
 
-def kv_row(key, value):
+def kv_row(key):
     w = QWidget()
     h = QHBoxLayout(w)
     h.setContentsMargins(0, 0, 0, 0)
     h.setSpacing(8)
     k = QLabel(key)
     k.setObjectName("Key")
-    v = QLabel(value)
+    v = QLabel("—")
     v.setObjectName("Value")
     v.setTextInteractionFlags(Qt.TextSelectableByMouse)
     h.addWidget(k)
@@ -246,56 +216,18 @@ def kv_row(key, value):
     return w, v
 
 
-def hline():
-    f = QFrame()
-    f.setFixedHeight(1)
-    f.setStyleSheet("background-color: %s; border: none;" % C["border"])
-    return f
-
-
-def short(text, limit=30):
-    """Truncate for display; the caller puts the full text in a tooltip."""
-    t = str(text)
-    return t if len(t) <= limit else t[: limit - 1] + "\u2026"
-
-
-def dark_chrome(widget):
-    """Ask DWM for a dark title bar and Win11 rounded corners.
-
-    Without this the window frame keeps the Windows accent colour (green on
-    this machine), which clashes badly with a dark app.
-    """
-    try:
-        import ctypes
-        hwnd = int(widget.winId())
-        dwm = ctypes.windll.dwmapi
-        yes = ctypes.c_int(1)
-        # DWMWA_USE_DARK_MODE = 20  (Win10 20H1+ / Win11)
-        dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(yes), ctypes.sizeof(yes))
-        # DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2  (Win11 only)
-        rnd = ctypes.c_int(2)
-        dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(rnd), ctypes.sizeof(rnd))
-    except Exception:                                          # noqa: BLE001
-        pass
-
-
-# --------------------------------------------------------------------------- #
-# worker
-# --------------------------------------------------------------------------- #
-
 class Worker(QObject):
     done = Signal(object)
 
     def __init__(self, fn, *args):
         super().__init__()
-        self._fn = fn
-        self._args = args
+        self._fn, self._args = fn, args
 
     def run(self):
         try:
             res = self._fn(*self._args)
-        except Exception as exc:                              # noqa: BLE001
-            res = {"ok": False, "out": "", "error": str(exc)}
+        except Exception as exc:                               # noqa: BLE001
+            res = {"ok": False, "error": str(exc)}
         self.done.emit(res)
 
 
@@ -316,11 +248,12 @@ class Main(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.setMinimumWidth(600)
-        self.setMinimumHeight(780)
+        self.setMinimumWidth(620)
+        self.setMinimumHeight(720)
         self._threads = []
+        self._st = {}
         self._build()
-        self.reload_status()
+        self.reload()
 
     def showEvent(self, ev):
         super().showEvent(ev)
@@ -331,407 +264,326 @@ class Main(QWidget):
     def _build(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 18)
-        root.setSpacing(14)
+        root.setSpacing(12)
 
-        # header - the window title bar already says "VirtualDisplay", so there
-        # is no big in-app title; just the context line and the status pill
         head = QHBoxLayout()
         head.setSpacing(10)
-        sub = QLabel("虚拟显示器 · 单一目录 · 单进程 · C:\\VirtualDisplay")
+        sub = QLabel("虚拟显示器 · MttVDD · C:\\VirtualDisplay")
         sub.setObjectName("Sub")
         head.addWidget(sub)
         head.addStretch(1)
-        self.dot = Dot(False, C["faint"], 9)
+        self.dot = Dot(C["faint"], 9)
         head.addWidget(self.dot, 0, Qt.AlignVCenter)
         self.pill = QLabel("检测中")
         self.pill.setObjectName("Pill")
         head.addWidget(self.pill, 0, Qt.AlignVCenter)
         root.addLayout(head)
-        root.addSpacing(4)
 
-        # ---- alert banner: only shown when the driver needs attention ----
-        # The reset buttons live at the bottom of a long scroll area, so a
-        # disabled/wedged driver would otherwise hide its own fix below the fold.
+        # alert banner - shown only when something needs doing, and always
+        # with its own fix button so the remedy is never off-screen
         self.banner = QFrame()
         self.banner.setObjectName("Banner")
-        bl_ = QHBoxLayout(self.banner)
-        bl_.setContentsMargins(14, 10, 12, 10)
-        bl_.setSpacing(10)
-        self.banner_dot = Dot(False, C["danger"], 8)
-        bl_.addWidget(self.banner_dot, 0, Qt.AlignVCenter)
+        bl = QHBoxLayout(self.banner)
+        bl.setContentsMargins(14, 10, 12, 10)
+        bl.setSpacing(10)
+        self.banner_dot = Dot(C["danger"], 8)
+        bl.addWidget(self.banner_dot, 0, Qt.AlignVCenter)
         self.banner_text = QLabel("")
         self.banner_text.setObjectName("BannerText")
         self.banner_text.setWordWrap(True)
-        bl_.addWidget(self.banner_text, 1)
-        self.banner_btn = QPushButton("立即重置驱动")
+        bl.addWidget(self.banner_text, 1)
+        self.banner_btn = QPushButton("安装驱动")
         self.banner_btn.setObjectName("BannerBtn")
-        bl_.addWidget(self.banner_btn, 0, Qt.AlignVCenter)
+        bl.addWidget(self.banner_btn, 0, Qt.AlignVCenter)
         self.banner.setVisible(False)
         root.addWidget(self.banner)
 
-        # scrollable body - horizontal scrolling must never happen: a long value
-        # label would otherwise widen the layout and pop both scrollbars out
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setFrameShape(QFrame.NoFrame)
         body = QWidget()
-        bl = QVBoxLayout(body)
-        bl.setContentsMargins(0, 0, 0, 0)
-        bl.setSpacing(12)
+        bl2 = QVBoxLayout(body)
+        bl2.setContentsMargins(0, 0, 0, 0)
+        bl2.setSpacing(12)
         scroll.setWidget(body)
         root.addWidget(scroll, 1)
 
-        # ---- status card ----
-        c, cl = card("状态")
-        self.row_driver, self.val_driver = kv_row("驱动版本", "—")
-        self.row_daemon, self.val_daemon = kv_row("保活进程", "—")
-        self.row_phys, self.val_phys = kv_row("物理显示器", "—")
-        self.row_virt, self.val_virt = kv_row("虚拟显示器", "—")
-        self.row_auto, self.val_auto = kv_row("开机自启", "—")
-        for w in (self.row_driver, self.row_daemon, self.row_phys,
-                  self.row_virt, self.row_auto):
-            cl.addWidget(w)
-        bl.addWidget(c)
+        # ---- status ----
+        c1, l1 = card("状态")
+        self.row_dev, self.val_dev = kv_row("驱动设备")
+        self.row_virt, self.val_virt = kv_row("虚拟显示器")
+        self.row_phys, self.val_phys = kv_row("物理显示器")
+        self.row_cfg, self.val_cfg = kv_row("配置文件")
+        for w in (self.row_dev, self.row_virt, self.row_phys, self.row_cfg):
+            l1.addWidget(w)
+        bl2.addWidget(c1)
 
-        # ---- virtual display card ----
-        c2, c2l = card("虚拟显示器")
-        r1 = QHBoxLayout()
-        r1.setSpacing(8)
-        r1.addWidget(QLabel("分辨率"), 0)
-        self.cmb_res = QComboBox()
-        self.cmb_res.addItems(backend.RESOLUTIONS)
-        self.cmb_res.setEditable(True)
-        r1.addWidget(self.cmb_res, 1)
-        c2l.addLayout(r1)
+        # ---- active mode ----
+        c2, l2 = card("当前模式")
+        h = QLabel("改变虚拟屏实际使用哪一个模式。只影响虚拟屏，物理屏不受影响。")
+        h.setObjectName("Hint")
+        h.setWordWrap(True)
+        l2.addWidget(h)
+        r = QHBoxLayout()
+        r.setSpacing(8)
+        self.cmb_mode = QComboBox()
+        r.addWidget(self.cmb_mode, 1)
+        self.btn_apply = QPushButton("应用")
+        self.btn_apply.setObjectName("Primary")
+        r.addWidget(self.btn_apply)
+        l2.addLayout(r)
+        bl2.addWidget(c2)
 
-        self.chk_follow = QCheckBox("跟随 Moonlight（不强制分辨率）")
-        c2l.addWidget(self.chk_follow)
+        # ---- config ----
+        c3, l3 = card("配置")
+        h3 = QLabel("决定驱动提供几块虚拟屏、对外提供哪些分辨率。"
+                    "改动需要重载驱动才生效。")
+        h3.setObjectName("Hint")
+        h3.setWordWrap(True)
+        l3.addWidget(h3)
 
-        r2 = QHBoxLayout()
-        r2.setSpacing(8)
-        self.btn_start = QPushButton("启动")
-        self.btn_start.setObjectName("Primary")
-        self.btn_stop = QPushButton("停止")
-        self.btn_restart = QPushButton("重启")
-        for b in (self.btn_start, self.btn_stop, self.btn_restart):
-            r2.addWidget(b)
-        r2.addStretch(1)
-        self.btn_refresh = QPushButton("刷新")
-        r2.addWidget(self.btn_refresh)
-        c2l.addLayout(r2)
-        bl.addWidget(c2)
+        rc = QHBoxLayout()
+        rc.setSpacing(8)
+        rc.addWidget(QLabel("虚拟屏数量"))
+        self.spn_count = QSpinBox()
+        self.spn_count.setRange(1, 8)
+        rc.addWidget(self.spn_count)
+        self.btn_count = QPushButton("应用")
+        rc.addWidget(self.btn_count)
+        rc.addStretch(1)
+        l3.addLayout(rc)
 
-        # ---- desktop target card ----
-        c3, c3l = card("桌面显示在")
-        seg = QHBoxLayout()
-        seg.setSpacing(6)
-        self.seg_group = QButtonGroup(self)
-        self.seg_btns = {}
-        for i, (label, mode) in enumerate([("仅真实", "real"), ("仅虚拟", "virtual"),
-                                           ("扩展", "both"), ("切换", "toggle")]):
-            b = QPushButton(label)
-            b.setObjectName("Seg")
-            b.setCheckable(True)
-            self.seg_group.addButton(b, i)
-            self.seg_btns[mode] = b
-            seg.addWidget(b)
-        seg.addStretch(1)
-        c3l.addLayout(seg)
-        hint = QLabel("切换后鼠标可能跑到看不见的屏幕，随时可按 Win + P 回来")
-        hint.setObjectName("Hint")
-        c3l.addWidget(hint)
-        bl.addWidget(c3)
+        self.res_box = QVBoxLayout()
+        self.res_box.setSpacing(6)
+        l3.addLayout(self.res_box)
 
-        # ---- maintenance card ----
-        c4, c4l = card("维护")
+        ra = QHBoxLayout()
+        ra.setSpacing(6)
+        self.spn_w = QSpinBox(); self.spn_w.setRange(320, 7680); self.spn_w.setValue(2560)
+        self.spn_h = QSpinBox(); self.spn_h.setRange(200, 4320); self.spn_h.setValue(1440)
+        self.spn_hz = QSpinBox(); self.spn_hz.setRange(24, 480); self.spn_hz.setValue(60)
+        ra.addWidget(QLabel("宽"))
+        ra.addWidget(self.spn_w)
+        ra.addWidget(QLabel("高"))
+        ra.addWidget(self.spn_h)
+        ra.addWidget(QLabel("刷新"))
+        ra.addWidget(self.spn_hz)
+        self.btn_add_res = QPushButton("添加")
+        ra.addWidget(self.btn_add_res)
+        ra.addStretch(1)
+        l3.addLayout(ra)
+
+        rr = QHBoxLayout()
+        self.btn_reload = QPushButton("重载驱动（需管理员）")
+        self.btn_reload.setObjectName("Danger")
+        rr.addWidget(self.btn_reload)
+        rr.addStretch(1)
+        l3.addLayout(rr)
+        bl2.addWidget(c3)
+
+        # ---- misc ----
+        c4, l4 = card("其他")
         r4 = QHBoxLayout()
         r4.setSpacing(8)
-        self.btn_log = QPushButton("打开日志")
-        self.btn_clean = QPushButton("清理残留")
-        r4.addWidget(self.btn_log)
-        r4.addWidget(self.btn_clean)
+        self.btn_cfgdir = QPushButton("打开配置目录")
+        self.btn_projdir = QPushButton("打开项目目录")
+        r4.addWidget(self.btn_cfgdir)
+        r4.addWidget(self.btn_projdir)
         r4.addStretch(1)
-        c4l.addLayout(r4)
+        l4.addLayout(r4)
+        bl2.addWidget(c4)
 
-        r5 = QHBoxLayout()
-        r5.setSpacing(8)
-        self.chk_auto = QCheckBox("开机自动启动")
-        self.btn_auto = QPushButton("应用")
-        r5.addWidget(self.chk_auto)
-        r5.addWidget(self.btn_auto)
-        r5.addStretch(1)
-        c4l.addLayout(r5)
-        bl.addWidget(c4)
-
-        # ---- danger card ----
-        c5, c5l = card("驱动重置", danger=True)
-        d1 = QLabel("虚拟屏建不起来、出现一堆 DISPLAY38~53 幽灵条目时用。"
-                    "会禁用再启用 Parsec 适配器以清空驱动槽位表，并自动验证结果，不需要重启电脑。")
-        d1.setObjectName("Hint")
-        d1.setWordWrap(True)
-        c5l.addWidget(d1)
-        r6 = QHBoxLayout()
-        self.btn_reset = QPushButton("重置驱动并启动")
-        self.btn_reset.setObjectName("Danger")
-        self.btn_doctor = QPushButton("诊断驱动")
-        r6.addWidget(self.btn_reset)
-        r6.addWidget(self.btn_doctor)
-        r6.addStretch(1)
-        c5l.addLayout(r6)
-        self.lbl_verdict = QLabel("")
-        self.lbl_verdict.setObjectName("Hint")
-        self.lbl_verdict.setWordWrap(True)
-        self.lbl_verdict.setVisible(False)
-        c5l.addWidget(self.lbl_verdict)
-        bl.addWidget(c5)
-
-        # ---- log ----
-        c6, c6l = card("最近日志")
-        self.txt_log = QTextEdit()
-        self.txt_log.setObjectName("Log")
-        self.txt_log.setReadOnly(True)
-        self.txt_log.setFixedHeight(150)
-        c6l.addWidget(self.txt_log)
-        bl.addWidget(c6)
-
-        bl.addStretch(1)
+        bl2.addStretch(1)
 
         # ---- signals ----
-        self.btn_start.clicked.connect(lambda: self._act(backend.start, self._res()))
-        self.btn_stop.clicked.connect(lambda: self._act(backend.stop))
-        self.btn_restart.clicked.connect(lambda: self._act(backend.restart, self._res()))
-        self.btn_refresh.clicked.connect(self.reload_status)
-        self.btn_log.clicked.connect(lambda: self._act(backend.open_log))
-        self.btn_clean.clicked.connect(lambda: self._act(backend.clean))
-        self.btn_auto.clicked.connect(self._apply_autostart)
-        self.btn_reset.clicked.connect(self._reset)
-        self.btn_doctor.clicked.connect(self._doctor)
-        self.banner_btn.clicked.connect(self._reset)
-        self.seg_group.buttonClicked.connect(self._switch)
-        self.chk_follow.stateChanged.connect(self._follow_changed)
-
-    # ---------------- helpers ----------------
-
-    def _res(self):
-        return self.cmb_res.currentText().strip()
-
-    def _act(self, fn, *args):
-        """Run a backend action off the UI thread, then refresh."""
-        self._set_busy(True)
-        t = ActionThread(fn, *args)
-        t.worker.done.connect(lambda _r: self._after(t, _r))
-        t.finished.connect(lambda: self._set_busy(False))
-        self._threads.append(t)
-        t.start()
-
-    def _after(self, thread, res):
-        # surface a verdict line for the driver card
-        if isinstance(res, dict) and "wedged" in res:
-            if res.get("wedged"):
-                self._show_verdict(
-                    "驱动卡死：能接受指令但不创建显示器。"
-                    "请先点「重置驱动并启动」；若仍卡死则需重启电脑。", C["danger"])
-            elif res.get("healthy"):
-                self._show_verdict("驱动正常 ✓", C["success"])
-            elif res.get("not_attached"):
-                self._show_verdict(
-                    "驱动正常，显示器已创建但未挂到桌面 —— 用上面的「仅虚拟」切换接上。",
-                    C["warning"])
-            else:
-                self._show_verdict(res.get("verdict") or "诊断完成", C["muted"])
-        elif isinstance(res, dict) and not res.get("ok") and res.get("error"):
-            self._show_verdict("失败：" + res["error"], C["danger"])
-
-        if res.get("ok"):
-            self.txt_log.setPlainText(backend.log_tail(30))
-        else:
-            detail = res.get("out") or ""
-            self.txt_log.setPlainText(
-                "ERROR: %s\n\n%s\n\n%s"
-                % (res.get("error", ""), detail, backend.log_tail(20)))
-        self.reload_status()
-
-    def _set_busy(self, busy):
-        for b in (self.btn_start, self.btn_stop, self.btn_restart,
-                  self.btn_clean, self.btn_reset, self.btn_auto):
-            b.setEnabled(not busy)
-        self.btn_refresh.setEnabled(True)
+        self.btn_apply.clicked.connect(self._apply_mode)
+        self.btn_count.clicked.connect(self._apply_count)
+        self.btn_add_res.clicked.connect(self._add_res)
+        self.btn_reload.clicked.connect(self._reload)
+        self.btn_cfgdir.clicked.connect(lambda: self._act(backend.open_config_dir))
+        self.btn_projdir.clicked.connect(lambda: self._act(backend.open_project_dir))
+        self.banner_btn.clicked.connect(self._banner_action)
 
     # ---------------- actions ----------------
 
-    def reload_status(self):
+    def _act(self, fn, *args):
+        t = ActionThread(fn, *args)
+        t.worker.done.connect(self._after)
+        self._threads.append(t)
+        t.start()
+
+    def _after(self, res):
+        if isinstance(res, dict) and res.get("error"):
+            self._flash(res["error"], C["danger"])
+        elif isinstance(res, dict) and res.get("out"):
+            self._flash(res["out"], C["success"])
+        self.reload()
+
+    def _flash(self, text, color):
+        self.pill.setText(str(text)[:40])
+        self.pill.setStyleSheet(
+            "QLabel#Pill { font-size:11px; font-weight:600; padding:2px 10px;"
+            "border-radius:9px; color:%s; background-color:#1e232c; }" % color)
+
+    def _apply_mode(self):
+        data = self.cmb_mode.currentData()
+        if data:
+            self._act(backend.set_mode, data[0], data[1], data[2])
+
+    def _apply_count(self):
+        self._act(backend.set_count, self.spn_count.value())
+
+    def _add_res(self):
+        self._act(backend.add_resolution, self.spn_w.value(),
+                  self.spn_h.value(), self.spn_hz.value())
+
+    def _remove_res(self, m):
+        self._act(backend.remove_resolution, m[0], m[1], m[2])
+
+    def _need_admin(self, fn, *args):
+        """Run an admin action, elevating the whole panel if needed."""
+        if not backend.is_admin():
+            if not backend.elevate_and_rerun():
+                self._flash("已取消管理员授权", C["warning"])
+            return
+        self._act(fn, *args)
+
+    def _reload(self):
+        self._need_admin(backend.reload_driver)
+
+    def _banner_action(self):
+        mode = self._st.get("_banner_mode")
+        if mode == "install":
+            self._act(backend.start_install)
+        elif mode == "reload":
+            self._need_admin(backend.reload_driver)
+
+    # ---------------- refresh ----------------
+
+    def reload(self):
         s = backend.status()
         self._st = s
 
-        driver_ok = s["driver_version"] is not None
-        if driver_ok:
-            self.val_driver.setText("v%s（err %s）" % (s["driver_version"], s["driver_error"]))
-        else:
-            self.val_driver.setText("未检测到")
-            self.val_driver.setStyleSheet("color:%s;font-weight:600;" % C["danger"])
+        if not s.get("available"):
+            self.dot.set_state(False, C["danger"])
+            self._flash("核心模块不可用", C["danger"])
+            self._show_banner("load_error",
+                              "无法载入 vdd_core.py：%s\n"
+                              "检查 C:\\VirtualDisplay\\vdd_core.py 是否存在。"
+                              % s.get("error", ""), None)
+            for v in (self.val_dev, self.val_virt, self.val_phys, self.val_cfg):
+                v.setText("—")
+            self.cmb_mode.clear()
+            return
 
-        if s["daemon_running"]:
-            pid = " PID %s" % s["daemon_pid"] if s["daemon_pid"] else ""
-            self.val_daemon.setText("运行中%s" % pid)
-            self.val_daemon.setStyleSheet("color:%s;font-weight:600;" % C["success"])
-        else:
-            self.val_daemon.setText("未运行")
-            self.val_daemon.setStyleSheet("color:%s;font-weight:600;" % C["warning"])
+        installed = s.get("device_installed")
+        vd = s.get("virtual")
+        cfg = s.get("config")
 
-        p = s["physical"]
-        if p:
-            full = "%dx%d @ %dHz" % (p[0], p[1], p[2])
-            self.val_phys.setText(short(full, 26))
-            self.val_phys.setToolTip("%s\n%s" % (full, p[3]))
+        self.val_dev.setText("已安装" if installed else "未安装")
+        self.val_dev.setStyleSheet("font-size:11.5px;font-weight:600;color:%s;"
+                                   % (C["success"] if installed else C["danger"]))
+
+        if vd:
+            self.val_virt.setText("%s · %dx%d @ %dHz"
+                                  % (vd["device"], vd["width"], vd["height"], vd["hz"]))
+            self.val_virt.setStyleSheet("font-size:11.5px;font-weight:600;color:%s;"
+                                        % C["success"])
+        else:
+            self.val_virt.setText("无")
+            self.val_virt.setStyleSheet("font-size:11.5px;font-weight:600;color:%s;"
+                                        % C["warning"])
+
+        phys = [d for d in s.get("displays", []) if not d["virtual"] and d["attached"]]
+        if phys:
+            p = phys[0]
+            self.val_phys.setText("%dx%d @ %dHz" % (p["width"], p["height"], p["hz"]))
+            self.val_phys.setStyleSheet("font-size:11.5px;color:%s;" % C["text"])
         else:
             self.val_phys.setText("—")
-            self.val_phys.setToolTip("")
 
-        vd = s["virtual_displays"]
-        orphans = s.get("orphan_entries") or []
-        if not vd and orphans:
-            # nothing attached AND orphans present: the orphans are the blocker,
-            # so say that instead of a bare "未挂载"
-            self.val_virt.setText("未挂载（%d 个残留条目挡路）" % len(orphans))
-            self.val_virt.setStyleSheet("color:%s;font-weight:600;" % C["danger"])
-            self.val_virt.setToolTip(
-                "检测到 %d 个残留的虚拟显示器条目：\n%s\n\n"
-                "它们占着驱动插槽，新的显示器建不起来。\n"
-                "点最下面「重置驱动并启动」清空（自动提权，不用重启电脑）。\n"
-                "重置不掉就重启一次电脑。"
-                % (len(orphans), "\n".join(orphans)))
+        if cfg:
+            self.val_cfg.setText("count=%d · %d 个分辨率"
+                                 % (cfg["count"], len(cfg["resolutions"])))
+            self.val_cfg.setStyleSheet("font-size:11.5px;color:%s;" % C["text"])
+        else:
+            self.val_cfg.setText(s.get("config_error") or "—")
+            self.val_cfg.setStyleSheet("font-size:11.5px;color:%s;" % C["danger"])
+
+        # pill + banner
+        if not installed:
+            self.dot.set_state(False, C["danger"])
+            self._flash("驱动未安装", C["danger"])
+            self._show_banner("install",
+                              "没有检测到 MttVDD 虚拟显示驱动。点右侧按钮运行安装脚本"
+                              "（会弹 UAC，需要管理员）。", "安装驱动")
         elif not vd:
-            self.val_virt.setText("未挂载")
-            self.val_virt.setStyleSheet("color:%s;font-weight:600;" % C["warning"])
-            self.val_virt.setToolTip("")
-        elif len(vd) == 1:
-            res = s["configured_resolution"] or "跟随客户端"
-            self.val_virt.setText("%s · %s" % (vd[0], res))
-            self.val_virt.setStyleSheet("color:%s;font-weight:600;" % C["success"])
-            self.val_virt.setToolTip("")
+            self.dot.set_state(False, C["warning"])
+            self._flash("未挂载", C["warning"])
+            self._show_banner("reload",
+                              "驱动已安装但没有检测到虚拟显示器。"
+                              "若刚改过配置，点右侧按钮重载驱动。", "重载驱动")
+        elif cfg and cfg["count"] != s.get("virtual_count", 0):
+            self.dot.set_state(True, C["warning"])
+            self._flash("配置待生效", C["warning"])
+            self._show_banner("reload",
+                              "配置要求 %d 块虚拟屏，实际 %d 块 —— 点右侧按钮重载驱动。"
+                              % (cfg["count"], s.get("virtual_count", 0)), "重载驱动")
         else:
-            # more than one virtual display means the driver's slot table is
-            # polluted - say so instead of dumping a wall of device names
-            res = s["configured_resolution"] or "跟随客户端"
-            self.val_virt.setText("%d 个（槽位已污染，建议重置） · %s" % (len(vd), res))
-            self.val_virt.setStyleSheet("color:%s;font-weight:600;" % C["danger"])
-            self.val_virt.setToolTip(
-                "检测到 %d 个虚拟显示器：\n%s\n\n"
-                "这是驱动槽位表被反复增删污染的表现。\n"
-                "点最下面「重置驱动并启动」可清空，不用重启电脑。"
-                % (len(vd), "\n".join(vd)))
-
-        auto = s["autostart_installed"]
-        self.val_auto.setText("已注册" if auto else "未注册")
-        self.val_auto.setStyleSheet(
-            "color:%s;font-weight:600;" % (C["success"] if auto else C["faint"]))
-
-        # header pill
-        healthy = bool(vd) and s["daemon_running"]
-        polluted = len(vd) > 1 or bool(orphans)
-        if not driver_ok:
-            tone, word = C["danger"], "适配器已禁用"
-        elif healthy and not polluted:
-            tone, word = C["success"], "运行中"
-        elif orphans and not vd:
-            tone, word = C["danger"], "残留挡路"
-        elif polluted:
-            tone, word = C["danger"], "槽位污染"
-        elif s["ok"]:
-            tone, word = C["warning"], "未挂载"
-        else:
-            tone, word = C["danger"], "驱动不可用"
-        self.dot.set_on(healthy and not polluted, tone)
-        self.pill.setText(word)
-        self.pill.setStyleSheet(
-            "QLabel#Pill { font-size:11px; font-weight:600; padding:2px 10px;"
-            "border-radius:9px; color:%s; background-color:%s; }"
-            % (tone, "#1b2a27" if tone == C["success"] else
-               "#2a1f1b" if tone == C["warning"] else "#2a1b1b"))
-
-        self._update_banner(s, driver_ok)
-
-        # form state
-        if s["configured_resolution"] and not self.cmb_res.signalsBlocked():
-            idx = self.cmb_res.findText(s["configured_resolution"])
-            if idx >= 0:
-                self.cmb_res.setCurrentIndex(idx)
-            else:
-                self.cmb_res.setEditText(s["configured_resolution"])
-        self.chk_follow.setChecked(bool(s["follow_moonlight"]))
-        self.chk_auto.setChecked(bool(auto))
-
-        self.txt_log.setPlainText(backend.log_tail(25))
-
-    def _update_banner(self, s, driver_ok):
-        """Show the top banner only when the driver needs an action.
-
-        This exists because the fix button lives at the bottom of a scroll
-        area - a disabled driver would otherwise hide its own remedy.
-        """
-        orphans = s.get("orphan_entries") or []
-        vd = s["virtual_displays"]
-
-        if not driver_ok:
-            self.banner_text.setText(
-                "Parsec 适配器当前处于「已禁用」状态，虚拟屏无法工作。"
-                "点右侧按钮即可重新启用（会弹 UAC，需管理员）。")
-            self.banner_btn.setText("重新启用适配器")
-            self.banner.setVisible(True)
-        elif orphans and not vd:
-            self.banner_text.setText(
-                "检测到 %d 个残留虚拟显示器条目占着驱动插槽，新显示器建不起来。"
-                "点右侧按钮重置驱动（会自动验证，不用重启电脑）。" % len(orphans))
-            self.banner_btn.setText("重置驱动")
-            self.banner.setVisible(True)
-        else:
+            self.dot.set_state(True, C["success"])
+            self._flash("运行中", C["success"])
             self.banner.setVisible(False)
+            self._st["_banner_mode"] = None
 
-    def _switch(self, btn):
-        mode = [k for k, v in self.seg_btns.items() if v is btn][0]
-        self._act(backend.switch, mode)
+        # mode combo
+        self.cmb_mode.blockSignals(True)
+        self.cmb_mode.clear()
+        cur = (vd["width"], vd["height"], vd["hz"]) if vd else None
+        for m in s.get("modes", []):
+            self.cmb_mode.addItem("%dx%d @ %dHz" % m, m)
+        if cur:
+            for i in range(self.cmb_mode.count()):
+                if self.cmb_mode.itemData(i) == cur:
+                    self.cmb_mode.setCurrentIndex(i)
+                    break
+        self.cmb_mode.setEnabled(bool(s.get("modes")))
+        self.cmb_mode.blockSignals(False)
+        self.btn_apply.setEnabled(bool(s.get("modes")))
 
-    def _follow_changed(self, state):
-        """Persist follow_moonlight without touching the daemon."""
-        try:
-            with open(backend.SETTINGS, encoding="utf-8") as f:
-                cfg = json.load(f)
-        except Exception:                                      # noqa: BLE001
-            cfg = {}
-        cfg["follow_moonlight"] = bool(state)
-        try:
-            with open(backend.SETTINGS, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, indent=2)
-        except Exception as exc:                              # noqa: BLE001
-            self.txt_log.setPlainText("写设置失败: %s" % exc)
+        if cfg:
+            self.spn_count.blockSignals(True)
+            self.spn_count.setValue(cfg["count"])
+            self.spn_count.blockSignals(False)
+            self._rebuild_res_rows(cfg["resolutions"])
 
-    def _apply_autostart(self):
-        install = self.chk_auto.isChecked()
-        if install and not backend.is_admin():
-            if not backend.elevate_and_rerun():
-                self.txt_log.setPlainText("需要管理员权限，UAC 已取消")
-            return
-        self._act(backend.autostart, install)
+    def _show_banner(self, mode, text, btn_label):
+        self._st["_banner_mode"] = mode
+        self.banner_text.setText(text)
+        self.banner_btn.setText(btn_label or "")
+        self.banner_btn.setVisible(bool(btn_label))
+        self.banner.setVisible(True)
 
-    def _reset(self):
-        if not backend.is_admin():
-            if not backend.elevate_and_rerun():
-                self.txt_log.setPlainText("需要管理员权限，UAC 已取消")
-            return
-        self._show_verdict("重置中… 停保活 → 禁用适配器 → 启用 → 诊断验证", C["muted"])
-        self._act(backend.reset_driver)
-
-    def _doctor(self):
-        self._show_verdict("诊断中…", C["muted"])
-        self._act(backend.doctor)
-
-    def _show_verdict(self, text, color):
-        self.lbl_verdict.setText(text)
-        self.lbl_verdict.setStyleSheet(
-            "font-size:11px;color:%s;font-weight:500;" % color)
-        self.lbl_verdict.setVisible(True)
+    def _rebuild_res_rows(self, resolutions):
+        while self.res_box.count():
+            item = self.res_box.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        for m in resolutions:
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(8)
+            lab = QLabel("%dx%d @ %dHz" % m)
+            lab.setObjectName("Value")
+            h.addWidget(lab)
+            h.addStretch(1)
+            btn = QPushButton("移除")
+            btn.setObjectName("MiniDanger")
+            btn.clicked.connect(lambda _=False, mm=m: self._remove_res(mm))
+            h.addWidget(btn)
+            self.res_box.addWidget(row)
 
 
 # --------------------------------------------------------------------------- #
@@ -739,26 +591,32 @@ class Main(QWidget):
 # --------------------------------------------------------------------------- #
 
 def selftest():
-    import json
-    print("=== VirtualDisplay panel selftest %s ===" % _now())
-    print("root        :", backend.ROOT)
-    for f in ("vdd-keepalive.py", "vdd-switch.py"):
-        print("  exists %-20s %s" % (f, os.path.exists(os.path.join(backend.ROOT, f))))
+    import time
+    print("=== VirtualDisplay panel selftest %s ===" % time.strftime("%Y-%m-%d %H:%M:%S"))
+    print("core available :", backend.core_available())
+    if not backend.core_available():
+        print("  ERROR:", backend.CORE_ERROR)
 
     s = backend.status()
-    print("\n-- status --")
-    for k in ("ok", "driver_version", "driver_error", "daemon_running",
-              "daemon_pid", "virtual_count", "virtual_displays",
-              "physical", "configured_resolution", "follow_moonlight",
-              "autostart_installed"):
-        print("  %-22s %r" % (k, s[k]))
-    if s["error"]:
-        print("  ERROR:", s["error"])
+    if s.get("available"):
+        print("device installed:", s["device_installed"])
+        print("virtual count   :", s["virtual_count"])
+        vd = s.get("virtual")
+        print("virtual display :",
+              "%s %dx%d@%d" % (vd["device"], vd["width"], vd["height"], vd["hz"])
+              if vd else None)
+        print("modes offered   :", len(s.get("modes", [])))
+        cfg = s.get("config")
+        print("config count    :", cfg["count"] if cfg else None)
+        print("config error    :", s.get("config_error") or "(none)")
+    else:
+        print("status error    :", s.get("error"))
 
     print("\n-- backend callables --")
-    for name in ("start", "stop", "restart", "clean", "switch", "set_resolution",
-                 "reset_driver", "autostart", "log_tail", "open_log", "is_admin"):
-        print("  %-16s %s" % (name, callable(getattr(backend, name, None))))
+    for name in ("status", "modes", "set_mode", "set_count", "add_resolution",
+                 "remove_resolution", "reload_driver", "open_config_dir",
+                 "open_project_dir", "start_install", "is_admin"):
+        print("  %-18s %s" % (name, callable(getattr(backend, name, None))))
 
     print("\n-- ui import --")
     ui_ok = False
@@ -766,31 +624,22 @@ def selftest():
         from PySide6.QtWidgets import QApplication
         app = QApplication.instance() or QApplication([])
         w = Main()
-        print("  Main() constructed OK, size %dx%d" % (w.width(), w.height()))
-        print("  combobox items:", w.cmb_res.count())
-        print("  segment modes :", list(w.seg_btns.keys()))
-        print("  alert banner  :", "present" if hasattr(w, "banner") else "MISSING")
+        print("  Main() constructed OK, %dx%d" % (w.width(), w.height()))
+        print("  mode combo items:", w.cmb_mode.count())
+        print("  banner present  :", hasattr(w, "banner"))
         ui_ok = True
-    except Exception as exc:                                  # noqa: BLE001
+    except Exception as exc:                                   # noqa: BLE001
         print("  UI FAIL:", exc)
 
-    # RESULT reflects the BUILD (code + UI), not the driver state - a disabled
-    # adapter is a real-world condition the panel is designed to report, and
-    # failing the whole selftest over it would be misleading.
-    driver_ok = s["ok"] and s["driver_version"] is not None
     print("\nRESULT =", "OK" if ui_ok else "FAIL")
-    print("DRIVER =", "reachable (v%s)" % s["driver_version"] if driver_ok
-          else "unreachable - adapter may be disabled; use the reset button")
+    print("DRIVER =",
+          "installed, %d virtual display(s)" % s.get("virtual_count", 0)
+          if s.get("available") and s.get("device_installed")
+          else "not installed / not reachable")
     return 0 if ui_ok else 1
 
 
-def _now():
-    import time
-    return time.strftime("%Y-%m-%d %H:%M:%S")
-
-
 def main():
-    import os
     if "--selftest" in sys.argv:
         return selftest()
     app = QApplication(sys.argv)

@@ -1,6 +1,6 @@
-# VirtualDisplay — 虚拟显示器统一方案
+# VirtualDisplay — 虚拟显示器（MttVDD）
 
-单一目录、单一入口、单进程。2026-10-14 重构，取代原来散落各处的旧方案。
+一个目录、一个入口、**没有常驻进程**。2026-10-14 换用 MttVDD 驱动后重构。
 
 ---
 
@@ -8,7 +8,31 @@
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/Sunshine-Moonlight 配置指南.md`](docs/Sunshine-Moonlight%20配置指南.md) | 整套 Sunshine + Moonlight 串流的配置与排查记录（两页机器、跨网通道、显示模式不还原、笔记本 VDD 方案等）。虚拟屏只是其中第 8、11 章 |
+| [`docs/Sunshine-Moonlight 配置指南.md`](docs/Sunshine-Moonlight%20配置指南.md) | 整套 Sunshine + Moonlight 串流的配置与排查记录。虚拟屏只是其中第 8、11 章 |
+
+---
+
+## 为什么是 MttVDD
+
+原先用的是 **Parsec VDD 0.45**，它靠 IOCTL 频繁 ADD 来维持显示器存活，
+为此需要保活进程 + 守护进程 + 一整套「驱动卡死」恢复逻辑（约 750 行）。
+
+2026-10-14 该驱动彻底失效：`IOCTL_ADD` 返回 `err=0` 但监视器级枚举恒为 0，
+`REMOVE` 对索引 0~17 全部无效，**禁用/启用、restart-device、重启三样都救不回来**。
+注册表里也没有可清的脏配置 —— 是驱动本身坏了。
+
+换成 **MttVDD（VirtualDrivers/Virtual-Display-Driver 25.7.23，笔记本同款）** 后：
+
+| | Parsec VDD | MttVDD |
+|---|---|---|
+| 控制模型 | IOCTL ping 保活 | **静态配置**（读 XML 建显示器）|
+| 常驻进程 | 需要（2 个）| **不需要** |
+| 显示器存活 | 靠持续 ping | 驱动加载即存在 |
+| 「卡死」状态 | 会，且不可恢复 | **不存在这个环节** |
+| 代码量 | ~750 行引擎 | **0 行引擎** |
+
+代价：**改配置（虚拟屏数量、提供哪些分辨率）需要重载驱动**。
+但日常使用几乎不需要动配置。
 
 ---
 
@@ -16,192 +40,144 @@
 
 ```
 C:\VirtualDisplay\
-├─ docs\                      相关文档
-│  └─ Sunshine-Moonlight 配置指南.md
-├─ vdd.ps1                    引擎控制脚本（CLI，被 GUI 和脚本共用）
-├─ vdd-keepalive.py           保活引擎（自带 self-heal）
-├─ vdd-switch.py              显示器切换逻辑
-├─ vdd-keepalive.log          运行日志
-├─ panel\                     现代 GUI 的源码
-│  ├─ app.py                  PySide6 界面
-│  ├─ backend.py              后端封装（复用引擎脚本，不重实现驱动逻辑）
-│  └─ VirtualDisplayPanel.spec
-├─ gui\                       旧 tkinter 面板源码（已弃用，留档）
-└─ _archive_old_ParsecVDD\    旧方案归档（49 个文件，只读留存）
+├─ vdd.py                       命令行入口
+├─ vdd_core.py                  核心：XML 配置 + 设备查询 + 分辨率设置
+├─ install-driver.bat           一次性：装驱动
+├─ finish-setup.bat             一次性：清重复设备、重载驱动
+├─ driver\                      驱动文件（MttVDD + devcon）
+│  ├─ MttVDD.inf / .dll / .cat
+│  ├─ devcon.exe                创建 Root\MttVDD 设备用它
+│  └─ vdd_settings.xml          我们的配置模板
+├─ panel\                       现代 Qt6 面板
+│  ├─ app.py                    界面
+│  └─ backend.py                桥接层，import vdd_core，不自带逻辑
+├─ docs\                        相关文档
+└─ _archive_old_ParsecVDD\      旧 Parsec 方案归档
+   └─ engine\                   750 行保活引擎、切换脚本、旧面板源码
+
+C:\VirtualDisplayDriver\vdd_settings.xml    驱动强制要求的配置路径
 ```
 
-**桌面唯一入口**：`C:\Users\PC\Desktop\虚拟显示器.exe`（双击即用）
+**桌面入口**：`C:\Users\PC\Desktop\虚拟显示器.exe`
 
-GUI 是自包含的（backend 已打进 exe），所以放桌面不会产生第二份逻辑；
-它只通过命令行调用 `C:\VirtualDisplay\` 里的引擎脚本。
+> `C:\VirtualDisplayDriver\` 是**驱动写死的路径**，无法移动 ——
+> 这是唯一一处不在 `C:\VirtualDisplay\` 下的东西。
 
 ---
 
 ## 用法
 
-**日常**：双击桌面 `虚拟显示器.exe`
+### 图形界面
 
-界面分五张卡片：
+双击桌面 `虚拟显示器.exe`：
 
 | 卡片 | 内容 |
 |---|---|
-| 状态 | 驱动版本、保活进程、物理/虚拟显示器、开机自启 |
-| 虚拟显示器 | 分辨率下拉（9 个预设，也可手填）、跟随 Moonlight 开关、启动/停止/重启 |
-| 桌面显示在 | 仅真实 / 仅虚拟 / 扩展 / 切换（分段按钮） |
-| 维护 | 打开日志、清理残留、开机自启开关 |
-| 驱动重置 | 一键禁用→启用适配器，清空污染槽位表 |
+| 状态 | 驱动设备、虚拟显示器及当前分辨率、物理显示器、配置摘要 |
+| 当前模式 | 从驱动提供的模式里选一个并应用（**只影响虚拟屏**）|
+| 配置 | 虚拟屏数量、分辨率清单（可增删）、重载驱动 |
+| 其他 | 打开配置目录 / 项目目录 |
 
-需要管理员的两个动作（重置驱动、开机自启）会**在程序内自动弹 UAC 提权**，
-其余全部普通权限。
+需要管理员的两处（装驱动、重载驱动）会**在程序内自动弹 UAC**。
 
-**命令行备用**（脚本/自动化用）：
+### 命令行
 
 ```bat
-C:\VirtualDisplay\vdd.ps1 status
-C:\VirtualDisplay\vdd.ps1 start 2560x1440@60
-C:\VirtualDisplay\vdd.ps1 switch virtual
+vdd.py status                 当前状态
+vdd.py modes                  驱动提供的全部模式
+vdd.py set 2560x1440@60       切换虚拟屏当前模式
+vdd.py config                 显示配置
+vdd.py count 2                设虚拟屏数量（需 reload）
+vdd.py add 1920x1200@60       往清单里加一个分辨率
+vdd.py remove 1920x1080@60    从清单里删一个
+vdd.py reload                 重载驱动让配置生效（需管理员）
+vdd.py doctor                 完整体检
 ```
 
-| 子命令 | 作用 | 要管理员 |
-|---|---|---|
-| `start [WxH@Hz]` | 启动保活 | 否 |
-| `stop` | 停止并拔除虚拟屏 | 否 |
-| `restart` | 重启 | 否 |
-| `status` | 驱动/显示器/进程状态 | 否 |
-| `switch [real\|virtual\|both\|toggle]` | 切换桌面显示目标 | 否 |
-| `resolution X` | 设分辨率，如 `2560x1440@60` | 否 |
-| `clean` | 强制清理残留虚拟屏 | 否 |
-| `reset` | 重置 Parsec 驱动后启动 | **是** |
-| `autostart [rm]` | 安装/移除开机自启计划任务 | **是** |
-| `panel` | 打开 GUI | 否 |
-
-自检（不弹窗，验证打包完整性 + 后端 + UI 构造）：
+### 自检
 
 ```bat
-C:\Users\PC\Desktop\虚拟显示器.exe --selftest
+虚拟显示器.exe --selftest
 ```
+
+输出 `RESULT`（构建与 UI 是否正常）与 `DRIVER`（驱动实际状态）两行 ——
+刻意分开，否则驱动未安装会把「代码有问题」和「环境没配好」混为一谈。
 
 ---
 
-## 相比旧方案改了什么
+## 配置说明
 
-| | 旧（`C:\ParsecVDD-KeepAlive\`） | 新（`C:\VirtualDisplay\` + 桌面 exe） |
-|---|---|---|
-| 目录 | 1 个 + 桌面 1 个 exe | **1 个** |
-| 文件数 | 22 + 2 子目录 | **9 + 2 子目录**（另 49 个归档） |
-| 桌面入口 | 1 个 11MB tkinter exe | **1 个 49MB 现代 Qt6 exe** |
-| 内部入口 | 6 个 bat + 1 GUI = 7 种 | **1 个 GUI** + 1 个 `vdd.ps1`（备用 CLI） |
-| 常驻进程 | **2 个**（keepalive + guardian） | **1 个** |
-| 重复 exe | 2 份共 22MB | **1 份**（自包含，无第二份逻辑） |
-| 混入的无关物 | Sunshine 修复脚本、`measure.py`、`probe2.py` | 已分离/归档 |
-| 自启 | 2 个 HKCU Run 项 | **1 个计划任务**（自带失败重启） |
-| UI | tkinter 旧式 | **PySide6 / Qt6 深色卡片式** |
+`C:\VirtualDisplayDriver\vdd_settings.xml`：
 
-** guardian 为什么能去掉**：它的职责是「保活进程死了就拉起来」。
-现在改用 Windows 计划任务自带的 **restart-on-failure**（999 次 / 每 1 分钟）
-来完成同一件事，少一个常驻 pythonw。
+```xml
+<vdd_settings>
+    <monitors>
+        <count>1</count>            <!-- 要几块虚拟屏 -->
+    </monitors>
+    <global>
+        <g_refresh_rate>60</g_refresh_rate>   <!-- 这些刷新率会复制到每个分辨率上 -->
+        <g_refresh_rate>120</g_refresh_rate>
+        <g_refresh_rate>144</g_refresh_rate>
+    </global>
+    <resolutions>
+        <resolution>
+            <width>2560</width>     <!-- 对外提供哪些模式 -->
+            <height>1440</height>
+            <refresh_rate>60</refresh_rate>
+        </resolution>
+    </resolutions>
+</vdd_settings>
+```
 
-### GUI 技术选型
+两条要点：
 
-环境里 PySide6 6.11.1 和 flet 0.86.1 都已安装，**选 PySide6**：
+1. **配置文件只决定「提供哪些模式」，不决定「当前用哪个」。**
+   当前模式由 Windows 决定（并在 `ChangeDisplaySettingsEx` 里持久化）。
+   要换模式用 `vdd.py set` 或面板的「当前模式」卡片。
+2. **改完配置必须重载驱动**才生效。
 
-- 打包**零网络依赖**（flet pack 可能要去拉 Flutter engine）
-- Qt 认真做样式完全能达到现代质感（Telegram 桌面版就是 Qt）
-- 49MB 含完整 Qt 运行时，可接受
-
-界面为深色卡片式：状态点带脉冲动画、分段按钮、圆角卡片、细分边框、
-`Segoe UI` 字体栈。后端 `panel/backend.py` **只做封装，不重实现驱动逻辑**，
-所有动作都 shell out 给经过验证的 `vdd-keepalive.py` / `vdd-switch.py`。
+> ⚠️ XML 注释里**不能出现连续两个连字符**（XML 语法禁止），否则驱动解析失败。
 
 ---
 
-## ⚠️ 已知问题与 2026-10-14 修复
-
-### 已修复：保活进程失控累积显示器（引擎 bug）
-
-**症状**：`status` 出现越来越多 `\\.\DISPLAY22、23、24…` 的虚拟显示器，
-几分钟增加到 16 个还在涨；日志每 15 秒刷
-`self-heal: 驱动里没有监视器对象了 - 清闩锁重新 ADD`。
-
-**根因（2026-10-14 实验定性）**：`attached_parsec()` 用
-`EnumDisplayDevicesW(None, i)` 枚举，传 `NULL` 拿到的是**适配器级**条目，
-而这些条目的 `StateFlags` **恒为 `0x0`**（bit0 `ATTACHED_TO_DESKTOP` 不置位）：
-
-```
-adapter '\\.\DISPLAY22' flags=0x0  bit0(ATTACHED)=False
-adapter '\\.\DISPLAY23' flags=0x0  bit0(ATTACHED)=False
-... 共 16 条，全为 0x0
-```
-
-所以该函数**数学上永远返回 0**。一个坏函数同时杀死两套保护：
-
-| 依赖它的机制 | 后果 |
-|---|---|
-| 健康检查 `if att > 0` | 永不通过 → 自愈无限触发 |
-| 过多护栏 `if att > displays` | 永不触发 → 累积无人拦 |
-
-→ 自愈反复清闩锁 → 反复 ADD → 显示器无限增多。
-
-**修复（三处）**：
-
-1. `attached_parsec()` / `real_attached_count()` 改为**两级枚举**
-   （先用 `NULL` 取适配器，再用适配器名取监视器）——
-   bit0 只在监视器级可信。
-2. 新增 `parsec_adapter_entries()`：按适配器条目计数，
-   **完全不看 StateFlags**，作为独立第二道保险。
-3. ADD 前硬护栏：条目数已达目标就**绝不再 ADD**，改为走
-   `reattach_desktop()`。即使健康检查再坏也不会无限累积。
-
-**验证**：修复后启动 45 秒，条目数稳定在 16 不增长，日志出现
-`ADD skipped: 16 parsec display(s) already exist (target 1) - forcing reattach instead`。
-
-### 待处理：16 个孤儿条目（需驱动重置）
-
-上面那 16 个是历史累积的**孤儿条目** —— 存在但挂不上桌面，
-`DisplaySwitch` 也选不中。新的护栏能防止继续变多，但清不掉已有的。
-
-**解法**：面板里点「重置驱动并启动」（自动提权，禁用→启用适配器清槽位表），
-或重启电脑。重置后再启动保活，就是干净的 1 个显示器。
-
-### 曾经的误判（存档）
-
-2026-10-12 曾把虚拟屏建不起来归因为「Sunshine 的
-`ensure_only_display` 与虚拟屏互殴」。这只是**诱因之一**：
-互殴产生的 672 次增删循环污染了驱动槽位表，而保活自身的
-StateFlags 判定 bug 才是让污染无法自愈、反而持续扩大的真正原因。
-两者叠加才形成当时的死循环。
-
----
-
-## 依赖
-
-- Python 3.12（`C:\Program Files\Python312\`，仅标准库）
-- Parsec Virtual Display Driver v0.45（已安装，`ROOT\DISPLAY\0000`，`oem67.inf`）
-- PyInstaller 6.21（仅重打包 GUI 时需要）
-
-## 重建 GUI
+## 重建面板
 
 ```bat
 cd C:\VirtualDisplay\panel
 "C:\Program Files\Python312\python.exe" -m PyInstaller --noconfirm --clean ^
   --onefile --windowed --name VirtualDisplayPanel --icon ..\gui\app.ico ^
-  --add-data "backend.py;." --hidden-import backend app.py
+  --add-data "backend.py;." ^
+  --hidden-import backend ^
+  --hidden-import xml --hidden-import xml.etree --hidden-import xml.etree.ElementTree ^
+  --hidden-import ctypes --hidden-import ctypes.wintypes ^
+  app.py
 copy dist\VirtualDisplayPanel.exe "C:\Users\PC\Desktop\虚拟显示器.exe"
 ```
 
-**关于路径硬编码**：`backend.py` 里 `ROOT = r"C:\VirtualDisplay"` 是写死的。
-整合的意义就是只有一个固定位置，硬编码反而比相对路径稳
-（PyInstaller onefile 下 `__file__` 指向临时解包目录，不可用）。
+**那几个 `--hidden-import` 不能省。** `panel/backend.py` 在运行时才
+`import vdd_core`（从 `C:\VirtualDisplay\` 动态加载，避免逻辑重复），
+PyInstaller 静态分析看不到它，于是 `vdd_core` 依赖的 `xml.etree.ElementTree`
+和 `ctypes.wintypes` 都不会被打进去，运行时报 `ModuleNotFoundError`。
 
-**exe 是自包含的**：`backend.py` 已通过 `--add-data` 打进包，
-所以从任何目录运行都正常（已从 `C:\` 和桌面分别验证）。
+## 设计要点
 
-## 自检（不弹窗）
+- **单一实现**：`vdd_core.py` 是唯一的逻辑所在。CLI、面板、任何脚本都用它。
+  面板的 `backend.py` 只是薄桥接（`sys.path` 插入项目根后 import），
+  所以**改 `vdd_core.py` 无需重新打包面板**。
+- **安全守卫**：`set_mode()` 拒绝任何非虚拟显示器，方法名写错也不会动到物理屏。
+- **分辨率一律读真实像素**：用 `EnumDisplaySettings`，不用返回逻辑坐标的 API。
+  否则 4K 屏在 200% 缩放下会被报成 1920x1080。
+- **没有保活进程**，因此没有「进程崩了要拉起」「驱动卡死要重置」这类问题。
 
-```bat
-C:\Users\PC\Desktop\虚拟显示器.exe --selftest
-```
+## 依赖
 
-依次验证：引擎脚本存在 → 状态解析（驱动版本/进程/显示器/物理模式）→
-11 个后端方法可调用 → `Main()` 能否构造 → 下拉项数 → 分段模式数。
-全部通过打 `RESULT = OK`。
+- Python 3.12（`C:\Program Files\Python312\`，仅标准库）
+- MttVDD 25.7.23 驱动（已安装，设备 `ROOT\DISPLAY\0001`）
+- PyInstaller 6.21（仅重建面板时需要）
+
+## 已知限制
+
+- 改配置后必须重载驱动 —— 这是静态配置模型的代价，MttVDD 本身不支持热改。
+- 重载驱动需要管理员权限。
+- 驱动二进制（`MttVDD.dll` / `.cat` / `devcon.exe`）不入版本控制，
+  见 `.gitignore` 里的下载地址。
