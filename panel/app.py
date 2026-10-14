@@ -15,12 +15,13 @@ from PySide6.QtCore import (QThread, QTimer, QPropertyAnimation, QEasingCurve,
 from PySide6.QtGui import QColor, QPainter, QBrush
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QComboBox, QSpinBox, QScrollArea,
+    QFrame, QComboBox, QSpinBox, QScrollArea, QSizeGrip,
 )
 
 import backend
 
 APP_NAME = "VirtualDisplay"
+
 
 # --------------------------------------------------------------------------- #
 # palette
@@ -44,10 +45,21 @@ C = {
 STYLE = """
 QWidget#Root {
     background-color: %(bg)s;
+    border: 1px solid %(border)s;
     font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
     font-size: 12px;
     color: %(text)s;
 }
+
+QWidget#TitleBar { background-color: %(card)s; border: none;
+                   border-bottom: 1px solid %(border)s; }
+QLabel#TitleText { font-size: 12px; font-weight: 600; color: %(text)s; }
+QPushButton#WinBtn, QPushButton#WinClose {
+    background-color: transparent; border: none; border-radius: 6px;
+    color: %(muted)s; font-size: 12px; padding: 0; min-width: 0;
+}
+QPushButton#WinBtn:hover   { background-color: #262c38; color: %(text)s; }
+QPushButton#WinClose:hover { background-color: #c0392b; color: #ffffff; }
 QLabel#Sub   { font-size: 11px; color: %(faint)s; }
 QLabel#SectionTitle { font-size: 12.5px; font-weight: 600; color: %(text)s; }
 QLabel#Hint  { font-size: 11px; color: %(muted)s; }
@@ -91,13 +103,17 @@ QComboBox {
     color: %(text)s; padding: 6px 10px; min-width: 150px; font-size: 12px;
 }
 QComboBox:hover { border-color: #333a47; }
-QComboBox::drop-down { border: none; width: 22px; }
-QComboBox::down-arrow {
-    image: none; width: 0; height: 0;
-    border-left: 4px solid transparent; border-right: 4px solid transparent;
-    border-top: 5px solid %(muted)s;
-}
-QComboBox:hover::down-arrow { border-top-color: %(text)s; }
+/* an explicit :focus rule is required: without it the style draws a focus
+   rect in the widget's text colour, which shows up as a bright line along
+   the top edge of the control */
+QComboBox:focus, QComboBox:on { border: 1px solid %(accent)s; }
+/* Do NOT style QComboBox::drop-down or ::down-arrow. Qt stops drawing the
+   native subcontrol as soon as either is styled, and every workaround we
+   tried produced artifacts: the border-triangle trick is browser-only and
+   does nothing in Qt; a custom paintEvent on a subclass corrupted the styled
+   frame (a bright full-width line along the top edge); an image on
+   ::down-arrow rendered a second chevron in the middle. Leaving both rules
+   out gives one clean native arrow. */
 QComboBox QAbstractItemView {
     background-color: #1f242e; border: 1px solid %(border)s; border-radius: 8px;
     color: %(text)s; selection-background-color: %(accent_dim)s; padding: 4px;
@@ -178,59 +194,99 @@ class Dot(QWidget):
         p.drawEllipse((self.width() - d) // 2, (self.height() - d) // 2, d, d)
 
 
-def dark_chrome(widget):
-    """Dark title bar + Win11 rounded corners.
+class TitleBar(QWidget):
+    """Custom title bar, so the frame colour is ours instead of the OS accent.
 
-    argtypes must be declared: without them ctypes marshals the HWND as a
-    32-bit C int, which truncates a 64-bit handle and makes the call fail
-    silently - the frame then keeps the Windows accent colour (green here).
+    Why not just ask Windows for a dark frame: on this build it is impossible.
+    Measured on Windows 10 19045 with the title bar sampled via GDI BitBlt:
+
+        baseline                    #779c48   (the OS accent colour)
+        DwmSetWindowAttribute(20)   returns S_OK, colour unchanged
+        DwmSetWindowAttribute(19)   E_INVALIDARG
+        SetWindowTheme(DarkMode_Explorer)  returns S_OK, colour unchanged
+
+    Attribute 20 is a Windows 11 feature - on Windows 10 it reports success and
+    does nothing. So the window is frameless and we draw the bar ourselves.
+    """
+
+    def __init__(self, parent, title):
+        super().__init__(parent)
+        self._win = parent
+        self._drag_origin = None
+        self.setObjectName("TitleBar")
+        # a QWidget subclass does NOT honour a stylesheet background unless
+        # this attribute is set - without it the bar stays transparent and
+        # the QSS rule silently does nothing
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setFixedHeight(40)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(14, 0, 8, 0)
+        lay.setSpacing(8)
+
+        self.dot_brand = Dot(C["accent"], 8)
+        lay.addWidget(self.dot_brand, 0, Qt.AlignVCenter)
+
+        name = QLabel(title)
+        name.setObjectName("TitleText")
+        lay.addWidget(name)
+        lay.addStretch(1)
+
+        for glyph, slot, obj in (("\u2500", self._on_min, "WinBtn"),
+                                 ("\u2715", self._on_close, "WinClose")):
+            b = QPushButton(glyph)
+            b.setObjectName(obj)
+            b.setFixedSize(36, 28)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(slot)
+            lay.addWidget(b)
+
+    def _on_min(self):
+        self._win.showMinimized()
+
+    def _on_close(self):
+        self._win.close()
+
+    # dragging the bar moves the window, as a native one would
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self._drag_origin = (ev.globalPosition().toPoint()
+                                 - self._win.frameGeometry().topLeft())
+            ev.accept()
+
+    def mouseMoveEvent(self, ev):
+        if self._drag_origin is not None and ev.buttons() & Qt.LeftButton:
+            self._win.move(ev.globalPosition().toPoint() - self._drag_origin)
+            ev.accept()
+
+    def mouseReleaseEvent(self, ev):
+        self._drag_origin = None
+
+    def mouseDoubleClickEvent(self, ev):
+        if self._win.isMaximized():
+            self._win.showNormal()
+        else:
+            self._win.showMaximized()
+
+
+def dark_chrome(widget):
+    """Kept only for the Win11 rounded-corner preference.
+
+    On Windows 10 this cannot darken the title bar - see TitleBar's docstring
+    for the measurements. The frameless window is what actually solves it.
     """
     try:
         import ctypes
         from ctypes import wintypes
-
         dwm = ctypes.windll.dwmapi
         dwm.DwmSetWindowAttribute.argtypes = [
             wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
         dwm.DwmSetWindowAttribute.restype = ctypes.c_long
-
         hwnd = wintypes.HWND(int(widget.winId()))
-        yes = ctypes.c_int(1)
-        # DWMWA_USE_DARK_MODE = 20  (Win10 20H1+ / Win11)
-        dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(yes), ctypes.sizeof(yes))
-        # DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2  (Win11 only)
         rnd = ctypes.c_int(2)
         dwm.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(rnd), ctypes.sizeof(rnd))
     except Exception:                                          # noqa: BLE001
         pass
-
-
-class ArrowCombo(QComboBox):
-    """QComboBox that paints its own chevron.
-
-    Qt's QSS box model does not render a border-triangle for ::down-arrow
-    (the `width:0;height:0;border-top:` trick is a browser thing), and the
-    native arrow is near-invisible on a dark theme. Painting it directly is
-    the only reliable way.
-    """
-
-    def paintEvent(self, ev):
-        super().paintEvent(ev)
-        from PySide6.QtGui import QPen
-        from PySide6.QtCore import QPointF
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        col = QColor(C["text"]) if self.underMouse() else QColor(C["muted"])
-        pen = QPen(col, 1.6)
-        pen.setCapStyle(Qt.RoundCap)
-        pen.setJoinStyle(Qt.RoundJoin)
-        p.setPen(pen)
-        cx = self.width() - 15
-        cy = self.height() / 2 - 1
-        p.drawPolyline([QPointF(cx - 3.5, cy - 2),
-                        QPointF(cx, cy + 2),
-                        QPointF(cx + 3.5, cy - 2)])
-        p.end()
 
 
 def card(title=None, warn=False):
@@ -302,6 +358,9 @@ class Main(QWidget):
         super().__init__()
         self.setObjectName("Root")          # required by the QWidget#Root rule
         self.setWindowTitle(APP_NAME)
+        # frameless: the native frame cannot be darkened on Windows 10, so we
+        # draw our own title bar (see TitleBar)
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setMinimumWidth(620)
         self.setMinimumHeight(720)
         self._threads = []
@@ -311,17 +370,23 @@ class Main(QWidget):
 
     def showEvent(self, ev):
         super().showEvent(ev)
+        # rounded corners where the OS supports it (Win11); harmless elsewhere
         dark_chrome(self)
-        # the frame is not fully created during the first showEvent on some
-        # systems, so re-apply once the event loop has spun
-        QTimer.singleShot(80, lambda: dark_chrome(self))
 
     # ---------------- construction ----------------
 
     def _build(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(20, 18, 20, 18)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(1, 1, 1, 1)   # room for the border
+        outer.setSpacing(0)
+
+        self.title_bar = TitleBar(self, APP_NAME)
+        outer.addWidget(self.title_bar)
+
+        root = QVBoxLayout()
+        root.setContentsMargins(20, 14, 20, 14)
         root.setSpacing(12)
+        outer.addLayout(root, 1)
 
         head = QHBoxLayout()
         head.setSpacing(10)
@@ -368,6 +433,16 @@ class Main(QWidget):
         scroll.setWidget(body)
         root.addWidget(scroll, 1)
 
+        # a frameless window has no resize border, so give it a size grip
+        grip_row = QHBoxLayout()
+        grip_row.setContentsMargins(0, 0, 0, 0)
+        grip_row.addStretch(1)
+        grip = QSizeGrip(self)
+        grip.setFixedSize(16, 16)
+        grip.setObjectName("Grip")
+        grip_row.addWidget(grip, 0, Qt.AlignBottom | Qt.AlignRight)
+        root.addLayout(grip_row)
+
         # ---- status ----
         c1, l1 = card("状态")
         self.row_dev, self.val_dev = kv_row("驱动设备")
@@ -386,7 +461,7 @@ class Main(QWidget):
         l2.addWidget(h)
         r = QHBoxLayout()
         r.setSpacing(8)
-        self.cmb_mode = ArrowCombo()
+        self.cmb_mode = QComboBox()
         r.addWidget(self.cmb_mode, 1)
         self.btn_apply = QPushButton("应用")
         self.btn_apply.setObjectName("Primary")
