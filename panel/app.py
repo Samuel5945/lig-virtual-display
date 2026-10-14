@@ -15,7 +15,7 @@ from PySide6.QtCore import (QThread, QTimer, QEvent, QPropertyAnimation,
 from PySide6.QtGui import QColor, QPainter, QBrush
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QComboBox, QSpinBox, QScrollArea, QSizeGrip,
+    QFrame, QComboBox, QSpinBox, QScrollArea, QSizeGrip, QMessageBox,
 )
 
 import backend
@@ -94,6 +94,20 @@ QPushButton#Danger:hover { background-color: #3a2222; border-color: #a04a4a; }
 QPushButton#BannerBtn { background-color: %(danger)s; border: 1px solid %(danger)s;
                         color: #2a0d0d; font-weight: 600; padding: 6px 14px; min-width: 0; }
 QPushButton#BannerBtn:hover { background-color: #ff9a9a; border-color: #ff9a9a; }
+QPushButton#Seg {
+    padding: 5px 12px; min-width: 0; font-size: 11.5px;
+    background-color: #1c212a; border: 1px solid %(border)s; color: %(muted)s;
+}
+QPushButton#Seg:hover { background-color: #232935; color: %(text)s; }
+QPushButton#Seg[active="true"] {
+    background-color: %(accent_dim)s; border-color: %(accent)s;
+    color: #eafffb; font-weight: 600;
+}
+QPushButton#SegDanger[active="true"] {
+    background-color: #5a2424; border-color: %(danger)s; color: #ffe4e4; font-weight: 600;
+}
+QLabel#Warn { font-size: 11px; color: %(warning)s; }
+
 QPushButton#MiniDanger { padding: 3px 9px; min-width: 0; font-size: 11px; border-radius: 6px;
                          background-color: #2a1c1c; border: 1px solid %(danger_dim)s; color: %(danger)s; }
 QPushButton#MiniDanger:hover { background-color: #3a2222; }
@@ -436,6 +450,14 @@ class Main(QWidget):
         self._build()
         self.reload()
 
+        # Windows' own display settings can be changed at any time; without a
+        # poll the panel silently shows stale values (that is exactly how the
+        # first round of this bug was reported).
+        self._poll = QTimer(self)
+        self._poll.setInterval(3000)
+        self._poll.timeout.connect(self._refresh_quiet)
+        self._poll.start()
+
     def showEvent(self, ev):
         super().showEvent(ev)
         # rounded corners where the OS supports it (Win11); harmless elsewhere
@@ -520,6 +542,51 @@ class Main(QWidget):
         for w in (self.row_dev, self.row_virt, self.row_phys, self.row_cfg):
             l1.addWidget(w)
         bl2.addWidget(c1)
+
+        # ---- display layout (multi-monitor) ----
+        c5, l5 = card("显示器布局（多显示器）")
+        self.lbl_layout_hint = QLabel("")
+        self.lbl_layout_hint.setObjectName("Hint")
+        self.lbl_layout_hint.setWordWrap(True)
+        l5.addWidget(self.lbl_layout_hint)
+
+        def seg_row(title, items, handler):
+            wrap = QWidget(); wrap.setObjectName("Row")
+            h = QHBoxLayout(wrap)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+            lab = QLabel(title); lab.setObjectName("Key")
+            lab.setMinimumWidth(74)
+            h.addWidget(lab)
+            btns = {}
+            for key, text, danger in items:
+                b = QPushButton(text)
+                b.setObjectName("SegDanger" if danger else "Seg")
+                b.setMinimumWidth(0)
+                b.clicked.connect(lambda _=False, k=key: handler(k))
+                h.addWidget(b)
+                btns[key] = b
+            h.addStretch(1)
+            l5.addWidget(wrap)
+            return btns
+
+        self.topo_btns = seg_row(
+            "显示模式",
+            [("extend", "扩展", False),
+             ("virtual", "仅虚拟屏", True),
+             ("physical", "仅物理屏", False),
+             ("clone", "复制", False)],
+            self._set_topo)
+        self.pos_btns = seg_row(
+            "虚拟屏位置",
+            [("left", "在左侧", False), ("right", "在右侧", False),
+             ("above", "在上方", False), ("below", "在下方", False)],
+            self._place)
+        self.prim_btns = seg_row(
+            "主显示器",
+            [("physical", "物理屏", False), ("virtual", "虚拟屏", False)],
+            self._make_primary)
+        bl2.addWidget(c5)
 
         # ---- active mode ----
         c2, l2 = card("虚拟屏分辨率（现在用哪个）")
@@ -654,6 +721,29 @@ class Main(QWidget):
             return
         self._act(fn, *args)
 
+    def _set_topo(self, key):
+        # "only the virtual display" switches the physical monitor off - if the
+        # user is reading this panel on that monitor their screen goes black,
+        # so make them confirm rather than surprising them.
+        if key == "virtual":
+            box = QMessageBox(self)
+            box.setWindowTitle("确认关闭物理显示器")
+            box.setIcon(QMessageBox.Warning)
+            box.setText("「仅虚拟屏」会把物理显示器关掉。\n\n"
+                        "如果你的屏幕现在显示着这个面板，它会立刻变黑。\n"
+                        "恢复方法：按 Win+P 循环切换显示模式。")
+            box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            box.setDefaultButton(QMessageBox.No)
+            if box.exec() != QMessageBox.Yes:
+                return
+        self._act(backend.set_topology, key)
+
+    def _place(self, side):
+        self._act(backend.place_beside, side)
+
+    def _make_primary(self, which):
+        self._act(backend.make_primary, which)
+
     def _reload(self):
         self._need_admin(backend.reload_driver)
 
@@ -666,8 +756,37 @@ class Main(QWidget):
 
     # ---------------- refresh ----------------
 
+    def _refresh_quiet(self):
+        """Poll in the background and only touch the UI if something moved."""
+        try:
+            s = backend.status(light=True)
+        except Exception:                                      # noqa: BLE001
+            return
+        if not s.get("available"):
+            return
+        sig = (s.get("topology"),
+               (s["virtual"] or {}).get("device"),
+               (s["virtual"] or {}).get("width"),
+               (s["virtual"] or {}).get("height"),
+               (s["virtual"] or {}).get("hz"),
+               (s["physical"] or {}).get("width"),
+               (s["physical"] or {}).get("height"),
+               (s["physical"] or {}).get("hz"),
+               tuple(sorted((s.get("scaling") or {}).items())),
+               len(s.get("modes") or []),
+               (s.get("config") or {}).get("count"),
+               bool((s["virtual"] or {}).get("primary") if s.get("virtual") else None))
+        if sig == getattr(self, "_last_sig", None):
+            return
+        self._last_sig = sig
+        self._apply_status(s)
+
     def reload(self):
         s = backend.status()
+        self._st = s
+        self._apply_status(s)
+
+    def _apply_status(self, s):
         self._st = s
 
         if not s.get("available"):
@@ -690,10 +809,14 @@ class Main(QWidget):
         self.val_dev.setStyleSheet("font-size:11.5px;font-weight:600;color:%s;"
                                    % (C["success"] if installed else C["danger"]))
 
+        scaling = s.get("scaling") or {}
+
         if vd:
-            self.val_virt.setText("%s · %dx%d @ %dHz"
-                                  % (friendly_device(vd["device"]),
-                                     vd["width"], vd["height"], vd["hz"]))
+            txt = "%s · %dx%d @ %dHz" % (friendly_device(vd["device"]),
+                                         vd["width"], vd["height"], vd["hz"])
+            if scaling.get(vd["device"]):
+                txt += " · 缩放 %d%%" % scaling[vd["device"]]
+            self.val_virt.setText(txt)
             self.val_virt.setStyleSheet("font-size:11.5px;font-weight:600;color:%s;"
                                         % C["success"])
         else:
@@ -704,7 +827,10 @@ class Main(QWidget):
         phys = [d for d in s.get("displays", []) if not d["virtual"] and d["attached"]]
         if phys:
             p = phys[0]
-            self.val_phys.setText("%dx%d @ %dHz" % (p["width"], p["height"], p["hz"]))
+            ptxt = "%dx%d @ %dHz" % (p["width"], p["height"], p["hz"])
+            if scaling.get(p["device"]):
+                ptxt += " · 缩放 %d%%" % scaling[p["device"]]
+            self.val_phys.setText(ptxt)
             self.val_phys.setStyleSheet("font-size:11.5px;color:%s;" % C["text"])
         else:
             self.val_phys.setText("—")
@@ -793,6 +919,48 @@ class Main(QWidget):
                 "\u3000\u3000读不到配置文件：%s" % (s.get("config_error") or "未知原因"))
             self.lbl_cfg_hint.setStyleSheet(
                 "font-size:11px;color:%s;" % C["danger"])
+
+        self._apply_layout(s, vd, phys)
+
+    def _apply_layout(self, s, vd, phys):
+        """Reflect the live multi-monitor state on the layout card."""
+        topo = s.get("topology")
+        labels = s.get("topology_labels") or {}
+        valid = s.get("topology_valid") or {}
+
+        def mark(btn, active):
+            if btn.property("active") != active:
+                btn.setProperty("active", active)
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
+
+        for key, b in self.topo_btns.items():
+            mark(b, key == topo)
+            b.setEnabled(bool(valid.get(key, True)))
+
+        vd_primary = bool(vd and vd.get("primary"))
+        for key, b in self.prim_btns.items():
+            mark(b, (key == "virtual" and vd_primary) or
+                    (key == "physical" and not vd_primary))
+            b.setEnabled(bool(vd) and bool(phys))
+
+        # position only means something while both screens are on
+        for b in self.pos_btns.values():
+            b.setEnabled(topo == "extend" and bool(vd) and bool(phys))
+
+        cur = labels.get(topo, "未知")
+        if topo == "virtual":
+            hint = ("当前：%s —— 物理屏已关闭。按 Win+P 或点上面的「扩展」可以恢复。"
+                    % cur)
+        else:
+            hint = ("当前：%s。这里改的就是 Windows 自己的显示模式，"
+                    "跟系统设置里的「多显示器」是同一处，两边会同步。" % cur)
+        if topo == "clone":
+            hint += "复制模式下两块屏必须用同一分辨率。"
+        self.lbl_layout_hint.setText(hint)
+        self.lbl_layout_hint.setStyleSheet(
+            "font-size:11px;color:%s;font-weight:600;"
+            % (C["warning"] if topo == "virtual" else C["muted"]))
 
     def _show_banner(self, mode, text, btn_label):
         self._st["_banner_mode"] = mode

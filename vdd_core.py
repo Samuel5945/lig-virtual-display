@@ -42,6 +42,35 @@ DRIVER_MATCH = "Virtual Display Driver"    # DeviceString the driver reports
 _user32 = ctypes.windll.user32
 
 
+def _ensure_dpi_awareness():
+    """Declare this process DPI aware, once, at import.
+
+    Without it Windows virtualises DPI and GetDpiForMonitor cheerfully reports
+    96 for every monitor - i.e. every display looks like 100% scaling, which is
+    exactly how this was first misread. Best effort: whoever set awareness
+    first wins, and a failure here is not fatal.
+    """
+    try:
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)
+        if _user32.SetProcessDpiAwarenessContext(
+                DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2):
+            return True
+    except Exception:                                          # noqa: BLE001
+        pass
+    try:
+        if ctypes.windll.shcore.SetProcessDpiAwareness(2) == 0:  # per-monitor
+            return True
+    except Exception:                                          # noqa: BLE001
+        pass
+    try:
+        return bool(_user32.SetProcessDPIAware())
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
+DPI_AWARE = _ensure_dpi_awareness()
+
+
 class DISPLAY_DEVICEW(ctypes.Structure):
     _fields_ = [
         ("cb", wintypes.DWORD),
@@ -54,6 +83,13 @@ class DISPLAY_DEVICEW(ctypes.Structure):
 
 
 class DEVMODEW(ctypes.Structure):
+    """DEVMODE in its *display* form.
+
+    dmOrientation..dmPrintQuality is a union: for display devices it holds
+    dmPosition (POINTL) + dmDisplayOrientation + dmDisplayFixedOutput instead
+    of the eight printer shorts. Reading positions is what lets us tell
+    "extend" apart from "clone" and move a display around.
+    """
     _fields_ = [
         ("dmDeviceName", ctypes.c_wchar * 32),
         ("dmSpecVersion", wintypes.WORD),
@@ -61,14 +97,10 @@ class DEVMODEW(ctypes.Structure):
         ("dmSize", wintypes.WORD),
         ("dmDriverExtra", wintypes.WORD),
         ("dmFields", wintypes.DWORD),
-        ("dmOrientation", ctypes.c_short),
-        ("dmPaperSize", ctypes.c_short),
-        ("dmPaperLength", ctypes.c_short),
-        ("dmPaperWidth", ctypes.c_short),
-        ("dmScale", ctypes.c_short),
-        ("dmCopies", ctypes.c_short),
-        ("dmDefaultSource", ctypes.c_short),
-        ("dmPrintQuality", ctypes.c_short),
+        ("dmPositionX", ctypes.c_long),
+        ("dmPositionY", ctypes.c_long),
+        ("dmDisplayOrientation", wintypes.DWORD),
+        ("dmDisplayFixedOutput", wintypes.DWORD),
         ("dmColor", ctypes.c_short),
         ("dmDuplex", ctypes.c_short),
         ("dmYResolution", ctypes.c_short),
@@ -95,9 +127,33 @@ class DEVMODEW(ctypes.Structure):
 ENUM_CURRENT_SETTINGS = -1
 CDS_UPDATEREGISTRY = 0x00000001
 CDS_TEST = 0x00000002
+CDS_SET_PRIMARY = 0x00000010
 DISP_CHANGE_SUCCESSFUL = 0
 DISP_CHANGE_BADMODE = -2
 DISP_CHANGE_FAILED = -1
+
+DM_POSITION = 0x00000020
+DM_PELSWIDTH = 0x00080000
+DM_PELSHEIGHT = 0x00100000
+DM_DISPLAYFREQUENCY = 0x00400000
+
+# SetDisplayConfig flags. Values matter: SDC_TOPOLOGY_SUPPLIED is 0x10, not
+# 0x400 (that is SDC_ALLOW_CHANGES), and it may NOT be combined with the other
+# topology flags - it means "caller supplies its own path array" and requires
+# that array to be non-NULL.
+SDC_TOPOLOGY_INTERNAL = 0x00000001
+SDC_TOPOLOGY_CLONE = 0x00000002
+SDC_TOPOLOGY_EXTEND = 0x00000004
+SDC_TOPOLOGY_EXTERNAL = 0x00000008
+SDC_VALIDATE = 0x00000040
+SDC_APPLY = 0x00000080
+
+TOPOLOGIES = {
+    "extend":   (SDC_TOPOLOGY_EXTEND,   "扩展（物理屏 + 虚拟屏）"),
+    "virtual":  (SDC_TOPOLOGY_EXTERNAL, "只用虚拟屏（关掉物理屏）"),
+    "physical": (SDC_TOPOLOGY_INTERNAL, "只用物理屏"),
+    "clone":    (SDC_TOPOLOGY_CLONE,    "复制（两块屏显示相同内容）"),
+}
 
 
 def _decode(raw):
@@ -240,6 +296,8 @@ def list_displays():
             "width": dm.dmPelsWidth,
             "height": dm.dmPelsHeight,
             "hz": dm.dmDisplayFrequency,
+            "x": dm.dmPositionX,
+            "y": dm.dmPositionY,
             "attached": attached,
             "primary": bool(ad.StateFlags & 0x4),
             "virtual": DRIVER_MATCH in (ad.DeviceString or ""),
@@ -328,11 +386,194 @@ def is_admin():
         return False
 
 
-def status():
-    """One call for the panel / CLI to render everything."""
-    inst = device_installed()
-    vds = virtual_displays()
-    vd = vds[0] if vds else None
+# ---------------- multi-monitor: topology, position, primary ----------------
+
+_user32.SetDisplayConfig.argtypes = [wintypes.UINT, ctypes.c_void_p,
+                                     wintypes.UINT, ctypes.c_void_p,
+                                     wintypes.UINT]
+_user32.SetDisplayConfig.restype = ctypes.c_long
+
+
+def topology_valid(name):
+    """True if Windows will accept this topology right now."""
+    if name not in TOPOLOGIES:
+        return False
+    code = TOPOLOGIES[name][0]
+    return _user32.SetDisplayConfig(0, None, 0, None, SDC_VALIDATE | code) == 0
+
+
+def set_topology(name):
+    """Switch between extend / only-virtual / only-physical / clone.
+
+    NOTE for callers: "virtual" turns the physical monitor OFF. If the user is
+    looking at this panel on the physical monitor, their screen goes dark until
+    it is switched back - the UI must warn before offering it.
+    """
+    if name not in TOPOLOGIES:
+        return {"ok": False, "error": "unknown topology: %s" % name}
+    code, _label = TOPOLOGIES[name]
+    rc = _user32.SetDisplayConfig(0, None, 0, None, SDC_APPLY | code)
+    if rc != 0:
+        return {"ok": False, "error": "SetDisplayConfig failed (code %d)" % rc}
+    return {"ok": True, "out": "已切换到「%s」" % TOPOLOGIES[name][1]}
+
+
+def current_topology():
+    """Infer the active topology from what is actually on the desktop."""
+    attached = [d for d in list_displays() if d["attached"]]
+    vds = [d for d in attached if d["virtual"]]
+    phys = [d for d in attached if not d["virtual"]]
+    if not attached:
+        return None
+    if vds and not phys:
+        return "virtual"
+    if phys and not vds:
+        return "physical"
+    if vds and phys:
+        v, p = vds[0], phys[0]
+        same_place = (v["x"] == p["x"] and v["y"] == p["y"])
+        same_size = (v["width"] == p["width"] and v["height"] == p["height"])
+        return "clone" if (same_place and same_size) else "extend"
+    return None
+
+
+def set_position(device, x, y):
+    """Move a display to (x, y) in the virtual desktop.
+
+    Only virtual displays are accepted - a typo must never shove the physical
+    monitor somewhere off-screen.
+    """
+    target = None
+    for d in list_displays():
+        if d["device"] == device and d["virtual"]:
+            target = d
+            break
+    if target is None:
+        return {"ok": False, "error": "%s is not a virtual display" % device}
+
+    dm = DEVMODEW()
+    dm.dmSize = ctypes.sizeof(DEVMODEW)
+    _user32.EnumDisplaySettingsW(device, ENUM_CURRENT_SETTINGS, ctypes.byref(dm))
+    dm.dmPositionX = int(x)
+    dm.dmPositionY = int(y)
+    dm.dmFields = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY
+    rc = _user32.ChangeDisplaySettingsExW(
+        device, ctypes.byref(dm), None, CDS_UPDATEREGISTRY, None)
+    if rc != DISP_CHANGE_SUCCESSFUL:
+        return {"ok": False, "error": "move failed (code %d)" % rc}
+    return {"ok": True, "out": "%s 移到 (%d, %d)" % (device, x, y)}
+
+
+def place_beside(device, side):
+    """Put the virtual display to the left/right/above/below the primary."""
+    virtual = None
+    for d in list_displays():
+        if d["device"] == device and d["virtual"]:
+            virtual = d
+            break
+    if virtual is None:
+        return {"ok": False, "error": "%s is not a virtual display" % device}
+
+    others = [d for d in list_displays() if d["attached"] and d["device"] != device]
+    if not others:
+        return {"ok": False, "error": "没有其它显示器可以参照"}
+    ref = [d for d in others if d["primary"]] or others
+    r = ref[0]
+
+    if side == "right":
+        pos = (r["x"] + r["width"], r["y"])
+    elif side == "left":
+        pos = (r["x"] - virtual["width"], r["y"])
+    elif side == "above":
+        pos = (r["x"], r["y"] - virtual["height"])
+    elif side == "below":
+        pos = (r["x"], r["y"] + r["height"])
+    else:
+        return {"ok": False, "error": "unknown side: %s" % side}
+    return set_position(device, pos[0], pos[1])
+
+
+def make_primary(device):
+    """Make a display the primary one (origin 0,0)."""
+    target = None
+    for d in list_displays():
+        if d["device"] == device:
+            target = d
+            break
+    if target is None:
+        return {"ok": False, "error": "no such display: %s" % device}
+
+    dm = DEVMODEW()
+    dm.dmSize = ctypes.sizeof(DEVMODEW)
+    _user32.EnumDisplaySettingsW(device, ENUM_CURRENT_SETTINGS, ctypes.byref(dm))
+    dm.dmPositionX = 0
+    dm.dmPositionY = 0
+    dm.dmFields = DM_POSITION
+    rc = _user32.ChangeDisplaySettingsExW(
+        device, ctypes.byref(dm), None,
+        CDS_SET_PRIMARY | CDS_UPDATEREGISTRY, None)
+    if rc != DISP_CHANGE_SUCCESSFUL:
+        return {"ok": False, "error": "set primary failed (code %d)" % rc}
+    return {"ok": True, "out": "%s 已设为主显示器" % device}
+
+
+# ---------------- per-monitor scaling (read-only) ----------------
+
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+def get_scaling(device):
+    """Effective DPI scale of a display, as a percentage (100, 125, 150...).
+
+    Read-only on purpose. Windows keeps per-monitor scaling in an EDID-hashed
+    registry key that a third-party app cannot derive reliably, and there is no
+    supported Win32 call to change it - writing the wrong key would rescale the
+    physical monitor. So the panel shows the value and hands changes off to
+    Windows' own display settings.
+    """
+    target = None
+    for d in list_displays():
+        if d["device"] == device and d["attached"]:
+            target = d
+            break
+    if target is None:
+        return None
+    try:
+        shcore = ctypes.windll.shcore
+        pt = _POINT(target["x"] + max(1, target["width"] // 2),
+                    target["y"] + max(1, target["height"] // 2))
+        MONITOR_DEFAULTTONEAREST = 2
+        hmon = _user32.MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
+        if not hmon:
+            return None
+        dx = wintypes.UINT()
+        dy = wintypes.UINT()
+        MDT_EFFECTIVE_DPI = 0
+        if shcore.GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI,
+                                   ctypes.byref(dx), ctypes.byref(dy)) != 0:
+            return None
+        return int(round(dx.value * 100.0 / 96.0))
+    except Exception:                                          # noqa: BLE001
+        return None
+
+
+_last_device_installed = None
+
+
+def status(light=False):
+    """One call for the panel / CLI to render everything.
+
+    light=True skips the pnputil subprocess, for UI polling loops where a
+    ~200ms spawn every few seconds would show up as stutter. The driver
+    presence flag is still reported, just taken from the cached last value.
+    """
+    global _last_device_installed
+    if light:
+        inst = _last_device_installed
+    else:
+        inst = device_installed()
+        _last_device_installed = inst
     cfg = None
     cfg_error = ""
     try:
@@ -344,6 +585,19 @@ def status():
     except Exception as exc:                                   # noqa: BLE001
         cfg_error = str(exc)
 
+    displays = list_displays()
+    vd = None
+    for d in displays:
+        if d["virtual"] and d["attached"]:
+            vd = d
+            break
+
+    phys = None
+    for d in displays:
+        if not d["virtual"] and d["attached"]:
+            phys = d
+            break
+
     return {
         "device_installed": inst,
         "device_id": DEVICE_ID,
@@ -351,8 +605,15 @@ def status():
         "config_error": cfg_error,
         "config_path": CONFIG_PATH,
         "virtual": vd,
-        "virtual_count": len(vds),
-        "displays": list_displays(),
+        "virtual_count": sum(1 for d in displays
+                             if d["virtual"] and d["attached"]),
+        "physical": phys,
+        "displays": displays,
         "modes": available_modes(vd["device"]) if vd else [],
+        "topology": current_topology(),
+        "topology_labels": {k: v[1] for k, v in TOPOLOGIES.items()},
+        "topology_valid": {k: topology_valid(k) for k in TOPOLOGIES},
+        "scaling": {d["device"]: get_scaling(d["device"])
+                    for d in displays if d["attached"]},
         "admin": is_admin(),
     }

@@ -32,12 +32,16 @@ def core_available():
 # read-only queries
 # --------------------------------------------------------------------------- #
 
-def status():
-    """Everything the UI needs. Never raises."""
+def status(light=False):
+    """Everything the UI needs. Never raises.
+
+    light=True is for the UI's polling timer: it skips the pnputil subprocess
+    (162ms -> 22ms), which would otherwise stutter every poll.
+    """
     if core is None:
         return {"available": False, "error": CORE_ERROR}
     try:
-        s = core.status()
+        s = core.status(light=light)
         s["available"] = True
         return s
     except Exception as exc:                                   # noqa: BLE001
@@ -144,6 +148,62 @@ def reload_driver():
     r = core.reload_driver()
     return {"ok": r.get("ok", False), "out": r.get("out", ""),
             "error": r.get("error", "")}
+
+
+# --------------------------------------------------------------------------- #
+# multi-monitor layout
+# --------------------------------------------------------------------------- #
+
+def set_topology(name):
+    """Switch display topology: extend / virtual / physical / clone.
+
+    "virtual" turns the physical monitor off - the caller must warn first.
+    """
+    if core is None:
+        return _err(CORE_ERROR)
+    r = core.set_topology(name)
+    return {"ok": r.get("ok", False), "out": r.get("out", ""),
+            "error": r.get("error", "")}
+
+
+def place_beside(side):
+    """Move the virtual display next to the physical one."""
+    if core is None:
+        return _err(CORE_ERROR)
+    vds = core.virtual_displays()
+    if not vds:
+        return _err("没有检测到虚拟显示器")
+    r = core.place_beside(vds[0]["device"], side)
+    return {"ok": r.get("ok", False), "out": r.get("out", ""),
+            "error": r.get("error", "")}
+
+
+def make_primary(which):
+    """which: 'physical' or 'virtual'."""
+    if core is None:
+        return _err(CORE_ERROR)
+    target = None
+    for d in core.list_displays():
+        if not d["attached"]:
+            continue
+        if which == "virtual" and d["virtual"]:
+            target = d
+        elif which == "physical" and not d["virtual"]:
+            target = d
+    if target is None:
+        return _err("找不到%s显示器" % ("虚拟" if which == "virtual" else "物理"))
+    r = core.make_primary(target["device"])
+    return {"ok": r.get("ok", False), "out": r.get("out", ""),
+            "error": r.get("error", "")}
+
+
+def open_windows_display_settings():
+    """Per-monitor scaling has no supported Win32 setter, so hand it off."""
+    try:
+        os.startfile("ms-settings:display")
+        return _ok("已打开 Windows 显示设置")
+    except Exception as exc:                                   # noqa: BLE001
+        return _err(str(exc))
 
 
 # --------------------------------------------------------------------------- #
