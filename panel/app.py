@@ -73,6 +73,10 @@ QLabel#Badge { font-size: 10px; font-weight: 600; color: %(accent)s;
 
 QFrame#Card     { background-color: %(card)s; border: 1px solid %(border)s; border-radius: 12px; }
 QFrame#CardWarn { background-color: %(card)s; border: 1px solid %(danger_dim)s; border-radius: 12px; }
+QDialog, QMessageBox { background-color: %(bg)s; }
+QMessageBox QLabel, QDialog QLabel { color: %(text)s; background: transparent; }
+QMessageBox QPushButton, QDialog QPushButton { color: %(text)s; }
+
 QFrame#Banner   { background-color: #2a1b1b; border: 1px solid %(danger_dim)s; border-radius: 10px; }
 QLabel#BannerText { color: #ffd9d9; font-size: 11.5px; }
 
@@ -407,6 +411,127 @@ def friendly_device(name):
     return (name or "").replace("\\\\.\\", "").replace("\\\\?\\", "")
 
 
+class ConfirmDialog(QWidget):
+    """Frameless dark confirm dialog with an Ok/Cancel pair.
+
+    QMessageBox was not usable here. Measured on this machine: its body renders
+    #ffffff / #f0f0f0 while the app palette's Window is #0f1115 - the native
+    style paints the dialog background itself and ignores the palette - and it
+    keeps the OS accent-coloured title bar, which is the exact green frame the
+    rest of the UI went frameless to avoid. It also labels its buttons "Yes"/"No"
+    in English. Drawing our own keeps everything consistent.
+    """
+
+    def __init__(self, parent, title, message, ok_text="确定",
+                 cancel_text="取消", on_ok=None, danger=True):
+        super().__init__(parent)
+        self._on_ok = on_ok
+        self.setObjectName("Root")
+        self.setWindowTitle(title)
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setWindowModality(Qt.ApplicationModal)
+        self.setMinimumWidth(430)
+        self._drag = None
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(1, 1, 1, 1)
+        lay.setSpacing(0)
+
+        # header: same look as the main title bar, but no minimise button
+        head = QWidget()
+        head.setObjectName("TitleBar")
+        head.setAttribute(Qt.WA_StyledBackground, True)
+        head.setFixedHeight(38)
+        h = QHBoxLayout(head)
+        h.setContentsMargins(14, 0, 8, 0)
+        h.setSpacing(8)
+        name = QLabel(title)
+        name.setObjectName("TitleText")
+        h.addWidget(name)
+        h.addStretch(1)
+        close = QPushButton("\u2715")
+        close.setObjectName("WinClose")
+        close.setFixedSize(36, 26)
+        close.setCursor(Qt.PointingHandCursor)
+        close.clicked.connect(self.reject)
+        h.addWidget(close)
+        head.mousePressEvent = self._head_press
+        head.mouseMoveEvent = self._head_move
+        head.mouseReleaseEvent = self._head_release
+        lay.addWidget(head)
+
+        body = QWidget()
+        body.setObjectName("Body")
+        b = QHBoxLayout(body)
+        b.setContentsMargins(22, 20, 22, 16)
+        b.setSpacing(14)
+        mark = QLabel("\u26a0")            # warning triangle
+        mark.setStyleSheet(
+            "font-size:26px; color:%s; background:transparent;"
+            % (C["warning"] if danger else C["accent"]))
+        b.addWidget(mark, 0, Qt.AlignTop)
+        msg = QLabel(message)
+        msg.setWordWrap(True)
+        msg.setObjectName("DialogText")
+        msg.setStyleSheet(
+            "font-size:12px; color:%s; background:transparent; line-height:150%%;"
+            % C["text"])
+        b.addWidget(msg, 1)
+        lay.addWidget(body)
+
+        foot = QWidget()
+        foot.setObjectName("Body")
+        f = QHBoxLayout(foot)
+        f.setContentsMargins(22, 6, 22, 18)
+        f.setSpacing(10)
+        f.addStretch(1)
+        cancel = QPushButton(cancel_text)
+        cancel.setCursor(Qt.PointingHandCursor)
+        cancel.clicked.connect(self.reject)
+        f.addWidget(cancel)
+        ok = QPushButton(ok_text)
+        ok.setObjectName("Danger" if danger else "Primary")
+        ok.setCursor(Qt.PointingHandCursor)
+        ok.setDefault(True)
+        ok.clicked.connect(self._accept)
+        f.addWidget(ok)
+        lay.addWidget(foot)
+
+        self.adjustSize()
+
+    def _accept(self):
+        self.close()
+        if self._on_ok:
+            self._on_ok()
+
+    def reject(self):
+        self.close()
+
+    # dragging, mirroring the main window's title bar
+    def _head_press(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self._drag = (ev.globalPosition().toPoint()
+                          - self.frameGeometry().topLeft())
+
+    def _head_move(self, ev):
+        if self._drag is not None and ev.buttons() & Qt.LeftButton:
+            self.move(ev.globalPosition().toPoint() - self._drag)
+
+    def _head_release(self, ev):
+        self._drag = None
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        # centre on the parent window
+        par = self.parent()
+        if par is not None:
+            g = par.frameGeometry()
+            self.move(g.center().x() - self.width() // 2,
+                      g.center().y() - self.height() // 2)
+        dark_chrome(self)
+
+
 class Worker(QObject):
     done = Signal(object)
 
@@ -726,16 +851,16 @@ class Main(QWidget):
         # user is reading this panel on that monitor their screen goes black,
         # so make them confirm rather than surprising them.
         if key == "virtual":
-            box = QMessageBox(self)
-            box.setWindowTitle("确认关闭物理显示器")
-            box.setIcon(QMessageBox.Warning)
-            box.setText("「仅虚拟屏」会把物理显示器关掉。\n\n"
-                        "如果你的屏幕现在显示着这个面板，它会立刻变黑。\n"
-                        "恢复方法：按 Win+P 循环切换显示模式。")
-            box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-            box.setDefaultButton(QMessageBox.No)
-            if box.exec() != QMessageBox.Yes:
-                return
+            ConfirmDialog(
+                self,
+                "确认关闭物理显示器",
+                "「仅虚拟屏」会把物理显示器关掉。\n\n"
+                "如果你的屏幕现在显示着这个面板，它会立刻变黑。\n"
+                "恢复方法：按 Win+P 循环切换显示模式。",
+                ok_text="仍然切换", cancel_text="取消",
+                on_ok=lambda: self._act(backend.set_topology, key),
+            ).show()
+            return
         self._act(backend.set_topology, key)
 
     def _place(self, side):
