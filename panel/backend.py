@@ -13,8 +13,17 @@ import os
 import sys
 
 ROOT = r"C:\VirtualDisplay"
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
+
+# vdd_core is loaded from the project directory when this machine has one
+# (single source of truth: editing it changes the CLI and the panel together),
+# and falls back to the copy bundled inside this exe otherwise - that is what
+# makes the exe usable when it is copied to another PC.
+_here = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+for _cand in (ROOT, _here):
+    if os.path.exists(os.path.join(_cand, "vdd_core.py")):
+        if _cand not in sys.path:
+            sys.path.insert(0, _cand)
+        break
 
 try:
     import vdd_core as core
@@ -22,6 +31,10 @@ try:
 except Exception as exc:                                       # noqa: BLE001
     core = None
     CORE_ERROR = "%s: %s" % (type(exc).__name__, exc)
+
+# True when this machine has the full project (scripts, docs); a shared exe on
+# a fresh PC will not, and the panel hides the project-specific actions.
+HAS_PROJECT = os.path.isdir(ROOT)
 
 
 def core_available():
@@ -241,11 +254,16 @@ def open_config_dir():
 
 
 def open_project_dir():
+    if not os.path.isdir(ROOT):
+        return _err("本机没有 %s（这是共享出去的副本）" % ROOT)
     return open_path(ROOT)
 
 
 def start_install():
     """Run the driver installer bat (it self-elevates)."""
+    if not HAS_PROJECT:
+        return _err("本机没有项目目录，无法运行安装脚本；"
+                    "请先按 README 安装 MttVDD 驱动")
     bat = os.path.join(ROOT, "install-driver.bat")
     if not os.path.exists(bat):
         return _err("not found: %s" % bat)

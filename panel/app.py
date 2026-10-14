@@ -749,7 +749,8 @@ class Main(QWidget):
 
         head = QHBoxLayout()
         head.setSpacing(10)
-        sub = QLabel("虚拟显示器 · MttVDD · C:\\VirtualDisplay")
+        sub = QLabel("虚拟显示器 · MttVDD" +
+                             (" · " + backend.ROOT if backend.HAS_PROJECT else "（共享副本）"))
         sub.setObjectName("Sub")
         head.addWidget(sub)
         head.addStretch(1)
@@ -1062,9 +1063,7 @@ class Main(QWidget):
             self.dot.set_state(False, C["danger"])
             self._flash("核心模块不可用", C["danger"])
             self._show_banner("load_error",
-                              "无法载入 vdd_core.py：%s\n"
-                              "检查 C:\\VirtualDisplay\\vdd_core.py 是否存在。"
-                              % s.get("error", ""), None)
+                              "无法载入 vdd_core.py：%s" % s.get("error", ""), None)
             for v in (self.val_dev, self.val_virt, self.val_phys, self.val_cfg):
                 v.setText("—")
             self.cmb_mode.clear()

@@ -27,6 +27,7 @@ It is the one location outside C:\\VirtualDisplay\\ and cannot be moved.
 
 import ctypes
 import os
+import re
 import subprocess
 import xml.etree.ElementTree as ET
 from ctypes import wintypes
@@ -34,7 +35,32 @@ from ctypes import wintypes
 ROOT = r"C:\VirtualDisplay"
 DRIVER_DIR = os.path.join(ROOT, "driver")
 CONFIG_PATH = r"C:\VirtualDisplayDriver\vdd_settings.xml"
-DEVICE_ID = r"ROOT\DISPLAY\0001"          # the MttVDD device instance
+# The device instance number (ROOT\DISPLAY\0001 on this machine) is assigned
+# when the driver is installed and differs from machine to machine, so it must
+# be discovered rather than hardcoded - otherwise a panel copied to another PC
+# looks for an instance that does not exist there.
+DEVICE_STARTED_MARKS = ("\u5df2\u542f\u52a8", "Started")   # 已启动 / Started
+
+
+def find_device():
+    """Instance id of the running MttVDD device, or None.
+
+    Matches on the driver's own friendly name, "Virtual Display Driver", which
+    is English whatever the OS language is (pnputil's labels are localised, the
+    device description is not).
+    """
+    rc, out, _ = _run(["pnputil", "/enum-devices", "/class", "Display"])
+    if rc != 0:
+        return None
+    for blk in re.split(r"\n\s*\n", out):
+        if DRIVER_MATCH not in blk:
+            continue
+        m = re.search(r"ROOT\\DISPLAY\\\d+", blk)
+        if not m:
+            continue
+        if any(k in blk for k in DEVICE_STARTED_MARKS):
+            return m.group(0)
+    return None
 DRIVER_MATCH = "Virtual Display Driver"    # DeviceString the driver reports
 
 # ---------------- Win32 ----------------
@@ -254,10 +280,7 @@ def write_config(cfg, path=CONFIG_PATH):
 
 def device_installed():
     """True if the MttVDD device exists and is started."""
-    rc, out, _ = _run(["pnputil", "/enum-devices", "/instanceid", DEVICE_ID])
-    if rc != 0:
-        return False
-    return ("\u5df2\u542f\u52a8" in out) or ("Started" in out)
+    return find_device() is not None
 
 
 def list_displays():
@@ -367,10 +390,14 @@ def set_mode(device, width, height, hz):
 
 def reload_driver():
     """Disable + enable the device so config changes take effect. Needs admin."""
-    rc1, _, e1 = _run(["pnputil", "/disable-device", DEVICE_ID])
+    dev = find_device()
+    if not dev:
+        return {"ok": False,
+                "error": "no running MttVDD device found (is the driver installed?)"}
+    rc1, _, e1 = _run(["pnputil", "/disable-device", dev])
     import time
     time.sleep(3)
-    rc2, _, e2 = _run(["pnputil", "/enable-device", DEVICE_ID])
+    rc2, _, e2 = _run(["pnputil", "/enable-device", dev])
     time.sleep(5)
     if rc1 != 0 or rc2 != 0:
         return {"ok": False,
@@ -569,9 +596,12 @@ def status(light=False):
     presence flag is still reported, just taken from the cached last value.
     """
     global _last_device_installed
-    if light:
+    if light and _last_device_installed is not None:
+        # cached - the cheap path for the UI polling loop
         inst = _last_device_installed
     else:
+        # cold cache: a light call must still answer correctly, otherwise the
+        # panel would report "driver not installed" on its very first poll
         inst = device_installed()
         _last_device_installed = inst
     cfg = None
@@ -600,7 +630,7 @@ def status(light=False):
 
     return {
         "device_installed": inst,
-        "device_id": DEVICE_ID,
+        "device_id": find_device(),
         "config": cfg,
         "config_error": cfg_error,
         "config_path": CONFIG_PATH,
