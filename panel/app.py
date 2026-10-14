@@ -1023,6 +1023,10 @@ class Main(QWidget):
             self._act(backend.start_install)
         elif mode == "reload":
             self._need_admin(backend.reload_driver)
+        elif mode == "config":
+            # writing into the driver's config dir needs admin; run the panel
+            # elevated rather than failing with a permission error
+            self._need_admin(backend.create_default_config)
 
     # ---------------- refresh ----------------
 
@@ -1118,6 +1122,14 @@ class Main(QWidget):
             self._show_banner("install",
                               "没有检测到 MttVDD 虚拟显示驱动。点右侧按钮运行安装脚本"
                               "（会弹 UAC，需要管理员）。", "安装驱动")
+        elif s.get("config_error"):
+            self.dot.set_state(False, C["warning"])
+            self._flash("配置缺失", C["warning"])
+            self._show_banner("config",
+                              "驱动的配置文件不存在（%s）。\n"
+                              "点右侧按钮写入一份默认配置（1 块屏、2560x1440/1080p/4K、60/120/144Hz），"
+                              "然后重载驱动。"
+                              % (s.get("config_error") or ""), "创建默认配置")
         elif not vd:
             self.dot.set_state(False, C["warning"])
             self._flash("未挂载", C["warning"])

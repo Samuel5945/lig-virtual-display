@@ -209,6 +209,65 @@ def _run(args, timeout=60):
 
 # ---------------- config ----------------
 
+DEFAULT_CONFIG = """<?xml version='1.0' encoding='utf-8'?>
+<vdd_settings>
+    <monitors>
+        <count>1</count>
+    </monitors>
+    <gpu>
+        <friendlyname>default</friendlyname>
+    </gpu>
+    <global>
+        <g_refresh_rate>60</g_refresh_rate>
+        <g_refresh_rate>120</g_refresh_rate>
+        <g_refresh_rate>144</g_refresh_rate>
+    </global>
+    <resolutions>
+        <resolution>
+            <width>2560</width>
+            <height>1440</height>
+            <refresh_rate>60</refresh_rate>
+        </resolution>
+        <resolution>
+            <width>1920</width>
+            <height>1080</height>
+            <refresh_rate>60</refresh_rate>
+        </resolution>
+        <resolution>
+            <width>3840</width>
+            <height>2160</height>
+            <refresh_rate>60</refresh_rate>
+        </resolution>
+    </resolutions>
+    <options>
+        <CustomEdid>false</CustomEdid>
+        <PreventSpoof>false</PreventSpoof>
+        <EdidCeaOverride>false</EdidCeaOverride>
+        <HardwareCursor>true</HardwareCursor>
+        <SDR10bit>false</SDR10bit>
+        <HDRPlus>false</HDRPlus>
+        <logging>false</logging>
+        <debuglogging>false</debuglogging>
+    </options>
+</vdd_settings>
+"""
+
+
+def ensure_config():
+    """Create the driver's config file if it is missing.
+
+    Returns the path when it wrote one, None when it was already there.
+    Writing to C://VirtualDisplayDriver// needs admin, so callers should be
+    prepared for a PermissionError.
+    """
+    if os.path.exists(CONFIG_PATH):
+        return None
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    with open(CONFIG_PATH, "w", encoding="utf-8", newline="\r\n") as f:
+        f.write(DEFAULT_CONFIG)
+    return CONFIG_PATH
+
+
 def read_config(path=CONFIG_PATH):
     """Read vdd_settings.xml into a plain dict.
 

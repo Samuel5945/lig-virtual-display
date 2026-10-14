@@ -210,6 +210,25 @@ def make_primary(which):
             "error": r.get("error", "")}
 
 
+def create_default_config():
+    """Write the driver's vdd_settings.xml when it is missing.
+
+    Needs admin (the driver's config dir sits under the drive root), so the
+    panel offers this from the banner and surfaces the permission error.
+    """
+    if core is None:
+        return _err(CORE_ERROR)
+    try:
+        wrote = core.ensure_config()
+        if wrote is None:
+            return _ok("配置文件已存在，无需创建")
+        return _ok("已创建 %s（需重载驱动生效）" % wrote)
+    except PermissionError:
+        return _err("写入需要管理员权限（驱动配置目录受系统保护）")
+    except Exception as exc:                                   # noqa: BLE001
+        return _err(str(exc))
+
+
 def open_windows_display_settings():
     """Per-monitor scaling has no supported Win32 setter, so hand it off."""
     try:

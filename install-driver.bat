@@ -9,7 +9,9 @@ if errorlevel 1 (
   exit /b
 )
 
-set "DRV=C:\VirtualDisplay\driver"
+rem Portable: the driver files are expected in a "driver" folder next to this
+rem script, so the whole folder can be copied to another PC as-is.
+set "DRV=%~dp0driver"
 set "CFGDIR=C:\VirtualDisplayDriver"
 
 echo ================================================================
