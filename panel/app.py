@@ -12,7 +12,9 @@ import sys
 
 from PySide6.QtCore import (QThread, QTimer, QEvent, QPropertyAnimation,
                             QEasingCurve, Qt, Signal, QObject)
-from PySide6.QtGui import QColor, QPainter, QBrush
+from PySide6.QtGui import QColor, QPainter, QBrush, QPen
+from PySide6.QtCore import QRectF, QPointF
+from PySide6.QtWidgets import QAbstractButton
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QComboBox, QSpinBox, QScrollArea, QSizeGrip, QMessageBox,
@@ -215,6 +217,94 @@ class Dot(QWidget):
         p.drawEllipse((self.width() - d) // 2, (self.height() - d) // 2, d, d)
 
 
+class GlyphButton(QAbstractButton):
+    """A window control that paints its own fill and glyph.
+
+    The QSS version had two problems. The stylesheet's min-width/padding shrank
+    the button to 12px wide while it stayed 26px tall, so once the hover fill
+    appeared it read as a stray vertical red pill instead of a window control;
+    and the fill switched on/off instantly, which looked like a glitch rather
+    than a hover. This draws a properly sized rounded square and fades the fill
+    in over ~130ms, and the glyphs are vector lines rather than text characters
+    so the stroke weight is even.
+    """
+
+    W, H, RADIUS = 34, 26, 6
+
+    def __init__(self, kind, parent=None, danger=False):
+        super().__init__(parent)
+        self._kind = kind            # "min" | "close" | "max"
+        self._danger = danger
+        self._t = 0.0                # 0 = idle, 1 = fully hovered
+        self.setFixedSize(self.W, self.H)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip({"min": "最小化", "close": "关闭", "max": "最大化"}.get(kind, ""))
+        # paint everything ourselves; keep QSS out of the way
+        self.setStyleSheet("background: transparent; border: none; padding: 0;")
+        self._anim = QPropertyAnimation(self, b"hoverT", self)
+        self._anim.setDuration(130)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    def get_hoverT(self):
+        return self._t
+
+    def set_hoverT(self, v):
+        self._t = float(v)
+        self.update()
+
+    hoverT = property(get_hoverT, set_hoverT)
+
+    def _to(self, target):
+        self._anim.stop()
+        self._anim.setStartValue(self._t)
+        self._anim.setEndValue(float(target))
+        self._anim.start()
+
+    def enterEvent(self, ev):
+        self._to(1.0)
+        super().enterEvent(ev)
+
+    def leaveEvent(self, ev):
+        self._to(0.0)
+        super().leaveEvent(ev)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+
+        if self._t > 0.01:
+            fill = QColor("#c0392b") if self._danger else QColor("#2c3340")
+            fill.setAlphaF(self._t * (0.90 if self._danger else 0.85))
+            p.setPen(Qt.NoPen)
+            p.setBrush(fill)
+            p.drawRoundedRect(self.rect().adjusted(1, 1, -2, -2),
+                              self.RADIUS, self.RADIUS)
+
+        # glyph: muted -> text colour, or white on a red hover
+        if self._danger and self._t > 0.45:
+            col = QColor("#ffffff")
+        else:
+            a, b = QColor(C["muted"]), QColor(C["text"])
+            k = self._t
+            col = QColor(int(a.red() + (b.red() - a.red()) * k),
+                         int(a.green() + (b.green() - a.green()) * k),
+                         int(a.blue() + (b.blue() - a.blue()) * k))
+        pen = QPen(col, 1.6)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+
+        cx, cy = self.width() / 2.0, self.height() / 2.0
+        if self._kind == "min":
+            p.drawLine(QPointF(cx - 5, cy), QPointF(cx + 5, cy))
+        elif self._kind == "close":
+            p.drawLine(QPointF(cx - 4.5, cy - 4.5), QPointF(cx + 4.5, cy + 4.5))
+            p.drawLine(QPointF(cx + 4.5, cy - 4.5), QPointF(cx - 4.5, cy + 4.5))
+        elif self._kind == "max":
+            p.drawRect(QRectF(cx - 4.5, cy - 4.5, 9, 9))
+        p.end()
+
+
 class TitleBar(QWidget):
     """Custom title bar, so the frame colour is ours instead of the OS accent.
 
@@ -253,12 +343,8 @@ class TitleBar(QWidget):
         lay.addWidget(name)
         lay.addStretch(1)
 
-        for glyph, slot, obj in (("\u2500", self._on_min, "WinBtn"),
-                                 ("\u2715", self._on_close, "WinClose")):
-            b = QPushButton(glyph)
-            b.setObjectName(obj)
-            b.setFixedSize(36, 28)
-            b.setCursor(Qt.PointingHandCursor)
+        for kind, slot in (("min", self._on_min), ("close", self._on_close)):
+            b = GlyphButton(kind, self, danger=(kind == "close"))
             b.clicked.connect(slot)
             lay.addWidget(b)
 
@@ -450,10 +536,7 @@ class ConfirmDialog(QWidget):
         name.setObjectName("TitleText")
         h.addWidget(name)
         h.addStretch(1)
-        close = QPushButton("\u2715")
-        close.setObjectName("WinClose")
-        close.setFixedSize(36, 26)
-        close.setCursor(Qt.PointingHandCursor)
+        close = GlyphButton("close", head, danger=True)
         close.clicked.connect(self.reject)
         h.addWidget(close)
         head.mousePressEvent = self._head_press
