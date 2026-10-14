@@ -5,7 +5,7 @@ a = Analysis(
     ['app.py'],
     pathex=[],
     binaries=[],
-    datas=[('backend.py', '.')],
+    datas=[('backend.py', '.'), ('../gui/app.ico', '.')],
     hiddenimports=['backend', 'xml', 'xml.etree', 'xml.etree.ElementTree', 'ctypes', 'ctypes.wintypes'],
     hookspath=[],
     hooksconfig={},

@@ -8,6 +8,7 @@ vdd_core.py from the project root - the panel holds no logic of its own.
     VirtualDisplayPanel.exe --selftest   headless check, prints a report
 """
 
+import os
 import sys
 
 from PySide6.QtCore import (QThread, QTimer, QEvent, QPropertyAnimation,
@@ -23,6 +24,40 @@ from PySide6.QtWidgets import (
 import backend
 
 APP_NAME = "VirtualDisplay"
+
+
+def _resource(name):
+    """Locate a bundled asset.
+
+    In a PyInstaller onefile build the payload is unpacked to sys._MEIPASS;
+    running from source it sits next to this file (or in ../gui for the ico).
+    """
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name).replace("\\", "/")
+
+
+_APP_ICON = None
+
+
+def app_icon():
+    """The application icon, for the taskbar / Alt-Tab.
+
+    Without an explicit window icon a Qt window falls back to whatever the
+    loader provides, and a frameless window frequently ends up with none at
+    all - which is how the panel lost its taskbar icon.
+    """
+    global _APP_ICON
+    if _APP_ICON is None:
+        from PySide6.QtGui import QIcon
+        for cand in (_resource("app.ico"),
+                     os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "..", "gui", "app.ico")):
+            if os.path.exists(cand):
+                _APP_ICON = QIcon(cand)
+                break
+        if _APP_ICON is None:
+            _APP_ICON = QIcon()
+    return _APP_ICON
 
 
 # --------------------------------------------------------------------------- #
@@ -441,6 +476,27 @@ def apply_dark_palette(app):
     app.setPalette(p)
 
 
+def force_taskbar_button(widget):
+    """Make sure a frameless window keeps its taskbar button.
+
+    Qt.Window | Qt.FramelessWindowHint usually keeps it, but Windows can drop
+    the window from the taskbar anyway unless WS_EX_APPWINDOW is set on the
+    native style. Cheap and idempotent.
+    """
+    try:
+        import ctypes
+        GWL_EXSTYLE = -16
+        WS_EX_APPWINDOW = 0x00040000
+        WS_EX_TOOLWINDOW = 0x00000080
+        user32 = ctypes.windll.user32
+        hwnd = int(widget.winId())
+        style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
+                              (style | WS_EX_APPWINDOW) & ~WS_EX_TOOLWINDOW)
+    except Exception:                                          # noqa: BLE001
+        pass
+
+
 def dark_chrome(widget):
     """Kept only for the Win11 rounded-corner preference.
 
@@ -514,6 +570,7 @@ class ConfirmDialog(QWidget):
         self._on_ok = on_ok
         self.setObjectName("Root")
         self.setWindowTitle(title)
+        self.setWindowIcon(app_icon())
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setWindowModality(Qt.ApplicationModal)
@@ -648,6 +705,7 @@ class Main(QWidget):
         super().__init__()
         self.setObjectName("Root")          # required by the QWidget#Root rule
         self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(app_icon())
         # frameless: the native frame cannot be darkened on Windows 10, so we
         # draw our own title bar (see TitleBar)
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
@@ -670,6 +728,9 @@ class Main(QWidget):
         super().showEvent(ev)
         # rounded corners where the OS supports it (Win11); harmless elsewhere
         dark_chrome(self)
+        # a frameless window must opt in explicitly, or the taskbar entry
+        # disappears along with the frame
+        force_taskbar_button(self)
 
     # ---------------- construction ----------------
 
