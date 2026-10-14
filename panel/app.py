@@ -10,8 +10,8 @@ vdd_core.py from the project root - the panel holds no logic of its own.
 
 import sys
 
-from PySide6.QtCore import (QThread, QTimer, QPropertyAnimation, QEasingCurve,
-                            Qt, Signal, QObject)
+from PySide6.QtCore import (QThread, QTimer, QEvent, QPropertyAnimation,
+                            QEasingCurve, Qt, Signal, QObject)
 from PySide6.QtGui import QColor, QPainter, QBrush
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -107,13 +107,16 @@ QComboBox:hover { border-color: #333a47; }
    rect in the widget's text colour, which shows up as a bright line along
    the top edge of the control */
 QComboBox:focus, QComboBox:on { border: 1px solid %(accent)s; }
-/* Do NOT style QComboBox::drop-down or ::down-arrow. Qt stops drawing the
-   native subcontrol as soon as either is styled, and every workaround we
-   tried produced artifacts: the border-triangle trick is browser-only and
-   does nothing in Qt; a custom paintEvent on a subclass corrupted the styled
-   frame (a bright full-width line along the top edge); an image on
-   ::down-arrow rendered a second chevron in the middle. Leaving both rules
-   out gives one clean native arrow. */
+/* Native drop-down paints its own block behind the arrow, which looks like a
+   stray button on our flat dark field. Styling ::drop-down suppresses that
+   block AND the native arrow, so the arrow is drawn by the Chevron overlay
+   instead (see Chevron). */
+QComboBox::drop-down {
+    background: transparent;
+    border: none;
+    width: 26px;
+}
+QComboBox::down-arrow { image: none; }
 QComboBox QAbstractItemView {
     background-color: #1f242e; border: 1px solid %(border)s; border-radius: 8px;
     color: %(text)s; selection-background-color: %(accent_dim)s; padding: 4px;
@@ -267,6 +270,42 @@ class TitleBar(QWidget):
             self._win.showNormal()
         else:
             self._win.showMaximized()
+
+
+class Chevron(QLabel):
+    """Chevron drawn as a transparent overlay on a QComboBox.
+
+    Qt cannot give us both "no block behind the arrow" and "a native arrow
+    that looks right". Styling ::drop-down removes the block but also
+    suppresses the native arrow, and putting an image on ::down-arrow
+    produced a second chevron. So the native arrow is disabled and this label
+    paints the chevron on top. It ignores mouse events so clicks still open
+    the popup.
+    """
+
+    W, H, RIGHT = 22, 18, 7
+
+    def __init__(self, combo, colour=None):
+        super().__init__(combo)
+        self._combo = combo
+        self.setText("\u25be")          # small solid down triangle
+        self.setAlignment(Qt.AlignCenter)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setStyleSheet(
+            "color: %s; background: transparent; font-size: 11px;"
+            % (colour or C["muted"]))
+        combo.installEventFilter(self)
+        self._place()
+
+    def _place(self):
+        self.setGeometry(self._combo.width() - self.W - self.RIGHT,
+                         (self._combo.height() - self.H) // 2,
+                         self.W, self.H)
+
+    def eventFilter(self, obj, ev):
+        if obj is self._combo and ev.type() == QEvent.Resize:
+            self._place()
+        return False
 
 
 def apply_dark_palette(app):
@@ -493,6 +532,8 @@ class Main(QWidget):
         r = QHBoxLayout()
         r.setSpacing(8)
         self.cmb_mode = QComboBox()
+        self.cmb_mode.setMinimumWidth(180)
+        Chevron(self.cmb_mode)
         r.addWidget(self.cmb_mode, 1)
         self.btn_apply = QPushButton("应用")
         self.btn_apply.setObjectName("Primary")

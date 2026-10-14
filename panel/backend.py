@@ -116,6 +116,18 @@ def remove_resolution(width, height, hz):
             return _err("%dx%d@%d 不在列表中" % m)
         if len(cfg["resolutions"]) <= 1:
             return _err("这是最后一个分辨率，不能删")
+
+        # Refuse to remove the mode the virtual display is using right now.
+        # Reloading with it gone would silently drop the display onto some
+        # other mode, which looks like the panel "lost" the setting.
+        vds = core.virtual_displays()
+        if vds:
+            vd = vds[0]
+            if (vd["width"], vd["height"], vd["hz"]) == m:
+                return _err(
+                    "%dx%d@%d 正是虚拟屏当前使用的分辨率。"
+                    "请先在上面「虚拟屏分辨率」里切到别的，再回来移除。" % m)
+
         cfg["resolutions"].remove(m)
         core.write_config(cfg)
         return _ok("已移除 %dx%d@%d（需重载驱动生效）" % m)
