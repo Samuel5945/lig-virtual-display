@@ -1,6 +1,6 @@
 # VirtualDisplay — 虚拟显示器（MttVDD）
 
-**v0.1** · 一个目录、一个入口、**没有常驻进程**。
+**v0.2.0** · **单文件 exe**：装驱动、控制、串流配置，全在「虚拟显示器.exe」里。
 
 2026-10-14 用 MttVDD 取代了坏掉的 Parsec VDD，并把整套工具链重写为静态配置模型：
 驱动读 XML 建屏，屏就一直在，不需要保活进程，也没有"驱动卡死"可恢复。
@@ -11,8 +11,11 @@ v0.1 覆盖：
 - **控制**：`vdd.py` 命令行 + Qt6 面板（同一份 `vdd_core.py`，单一实现）
 - **面板**：深色无边框 UI；与 Windows 设置**实时联动**；多显示器布局
   （扩展 / 仅虚拟屏 / 仅物理屏 / 复制、虚拟屏摆位、主显示器）；真实像素分辨率与缩放显示
-- **串流**：Sunshine `output_name` 指向虚拟屏 + `ensure_only_display`，
+- **串流（Sunshine）**：面板内一键配置 —— 自动从 Sunshine 日志解析虚拟屏的
+  device_id，写入 `output_name` + `ensure_only_display`，并重启 Sunshine 服务；
   串流时物理屏自动关闭、断开后还原
+- **可分享**：exe 内置 vdd_core/backend/应用图标/**驱动四件套 + 配置模板**，
+  单文件拷到新机器即可装驱动并管理；设备实例号动态发现（不再绑定 0001）
 
 ---
 
@@ -191,6 +194,7 @@ PyInstaller 静态分析看不到它，于是 `vdd_core` 依赖的 `xml.etree.El
 
 | 现象 | 真因 |
 |---|---|
+| exe 打包后报 `No module named 'json'` | vdd_core 新增 import 后，`--hidden-import` 清单必须同步 —— **这条已发生三次**（xml / ctypes.wintypes / json）|
 | `SetDisplayConfig` 恒返回 87 | 常量记错了：`SDC_TOPOLOGY_SUPPLIED` 是 `0x10` 不是 `0x400`，且**不能**与其他拓扑标志并用。正确写法 `SDC_APPLY \| SDC_TOPOLOGY_xxx`，两个数组必须为 NULL 且长度为 0 |
 | 缩放一律读成 100% | 进程未声明 DPI 感知时，Windows 会**谎报 96 dpi**。模块导入时调 `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)` 才拿到真值 |
 | 数字框黑字、列表选中项是绿的 | QSS 的 `color` 覆盖不到**走调色板渲染**的部件。必须同时装深色 `QPalette` |

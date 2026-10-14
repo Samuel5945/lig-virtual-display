@@ -26,9 +26,12 @@ It is the one location outside C:\\VirtualDisplay\\ and cannot be moved.
 """
 
 import ctypes
+import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 import xml.etree.ElementTree as ET
 from ctypes import wintypes
 
@@ -61,7 +64,8 @@ def find_device():
         if any(k in blk for k in DEVICE_STARTED_MARKS):
             return m.group(0)
     return None
-DRIVER_MATCH = "Virtual Display Driver"    # DeviceString the driver reports
+DRIVER_MATCH = "Virtual Display Driver"
+MARK = "Currently available display devices:"    # DeviceString the driver reports
 
 # ---------------- Win32 ----------------
 
@@ -470,6 +474,183 @@ def is_admin():
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:                                          # noqa: BLE001
         return False
+
+
+# ---------------- Sunshine (streaming host) ----------------
+
+SUNSHINE_CONFIG_DIRS = [
+    r"C:\Program Files\Sunshine\config",
+    r"C:\Program Files (x86)\Sunshine\config",
+    os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                 "LizardByte", "Sunshine"),
+]
+
+
+def sunshine_config_dir():
+    for c in SUNSHINE_CONFIG_DIRS:
+        if c and os.path.isdir(c):
+            return c
+    return None
+
+
+def sunshine_installed():
+    return sunshine_config_dir() is not None
+
+
+def sunshine_conf_path():
+    d = sunshine_config_dir()
+    return os.path.join(d, "sunshine.conf") if d else None
+
+
+def sunshine_log_path():
+    d = sunshine_config_dir()
+    return os.path.join(d, "sunshine.log") if d else None
+
+
+def read_conf_pairs(path):
+    """Parse a key = value config file into a dict (BOM tolerated)."""
+    out = {}
+    try:
+        with open(path, encoding="utf-8-sig", errors="replace") as f:
+            for line in f:
+                m = re.match(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.*?)\s*$", line)
+                if m:
+                    out[m.group(1)] = m.group(2)
+    except OSError:
+        pass
+    return out
+
+
+def sunshine_virtual_device_id():
+    """The virtual display's device_id as Sunshine reports it.
+
+    It can only come from Sunshine's own startup list (see the note on
+    output_name above); the log is truncated on every start, so the last block
+    in the current log is what matters.
+    """
+    lp = sunshine_log_path()
+    if not lp or not os.path.exists(lp):
+        return None
+    with open(lp, encoding="utf-8", errors="replace") as f:
+        txt = f.read()
+    blocks = re.findall(re.escape(MARK) + r"\s*(\[.*?\n\])", txt, re.S)
+    if not blocks:
+        return None
+    try:
+        devs = json.loads(blocks[-1])
+    except ValueError:
+        return None
+    for dv in devs:
+        ed = dv.get("edid") or {}
+        if ed.get("manufacturer_id") == "MTT" or \
+           "MTT" in (dv.get("friendly_name") or ""):
+            return dv.get("device_id")
+    return None
+
+
+def configure_sunshine_streaming():
+    """Point Sunshine at the virtual display and close the physical monitor
+    for the duration of a stream."""
+    cp = sunshine_conf_path()
+    if not cp:
+        return {"ok": False, "error": "本机未安装 Sunshine"}
+    dev_id = sunshine_virtual_device_id()
+    if not dev_id:
+        return {"ok": False,
+                "error": "Sunshine 日志里还没有虚拟屏的 device_id —— "
+                         "先重启一次 Sunshine 再试"}
+    with open(cp, encoding="utf-8-sig", errors="replace") as f:
+        lines = f.read().split("\n")
+    want = {"output_name": dev_id,
+            "dd_configuration_option": "ensure_only_display"}
+    seen = {}
+    out = []
+    for line in lines:
+        m = re.match(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=", line)
+        if m and m.group(1) in want:
+            k = m.group(1)
+            seen[k] = True
+            out.append("%s = %s" % (k, want[k]))
+        else:
+            out.append(line)
+    for k, v in want.items():
+        if not seen.get(k):
+            out.append("%s = %s" % (k, v))
+    with open(cp, "w", encoding="utf-8-sig", newline="\n") as f:
+        f.write("\n".join(out))
+    return {"ok": True,
+            "out": "output_name = %s\ndd_configuration_option = ensure_only_display"
+                   % dev_id}
+
+
+def restart_sunshine():
+    """Restart the Sunshine service (admin)."""
+    rc, _o, _e = _run(["net", "stop", "SunshineService"])
+    if rc != 0:
+        return {"ok": False, "error": "net stop SunshineService 失败 (rc=%d)" % rc}
+    rc, _o, _e = _run(["net", "start", "SunshineService"])
+    if rc != 0:
+        return {"ok": False, "error": "net start SunshineService 失败 (rc=%d)" % rc}
+    return {"ok": True, "out": "Sunshine 已重启"}
+
+
+# ---------------- driver install (portable, bundled in the panel exe) -----
+
+BUNDLED_DRIVER_FILES = ("MttVDD.inf", "MttVDD.dll", "MttVDD.cat", "devcon.exe")
+
+
+def driver_source_dir():
+    """Directory holding the driver files: the project, or the exe bundle."""
+    cands = [os.path.join(ROOT, "driver")]
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        cands.append(os.path.join(base, "driver"))
+    for c in cands:
+        if all(os.path.exists(os.path.join(c, f)) for f in BUNDLED_DRIVER_FILES):
+            return c
+    return None
+
+
+def install_driver_bundled():
+    r"""Install the driver from the files carried in the panel exe.
+
+    Idempotent on purpose: re-running devcon install while the device is
+    present creates a second instance (that is how this machine ended up with
+    ROOT\DISPLAY\0001 and 0002 at the same time), so an existing running
+    device is a no-op.
+
+    The driver files are copied next to the config first and installed from
+    there, so they outlive the exe's temporary unpack directory.
+    """
+    existing = find_device()
+    if existing:
+        return {"ok": True, "out": "驱动已安装（%s），无需重复安装" % existing}
+
+    src = driver_source_dir()
+    if not src:
+        return {"ok": False,
+                "error": "找不到驱动文件（需要 MttVDD.inf/dll/cat 和 devcon.exe）"}
+
+    dst = os.path.join(os.path.dirname(CONFIG_PATH), "driver")
+    os.makedirs(dst, exist_ok=True)
+    for f in BUNDLED_DRIVER_FILES:
+        shutil.copy2(os.path.join(src, f), os.path.join(dst, f))
+
+    ensure_config()
+
+    devcon = os.path.join(dst, "devcon.exe")
+    rc, _out, _err = _run([devcon, "install",
+                           os.path.join(dst, "MttVDD.inf"), "Root\\MttVDD"])
+    _run([devcon, "rescan"])
+    import time
+    time.sleep(4)
+
+    dev = find_device()
+    if rc != 0 or not dev:
+        return {"ok": False,
+                "error": "devcon install 失败 (rc=%s)；"
+                         "如果屏幕黑了按 Win+P 恢复" % rc}
+    return {"ok": True, "out": "驱动已安装（%s）" % dev}
 
 
 # ---------------- multi-monitor: topology, position, primary ----------------

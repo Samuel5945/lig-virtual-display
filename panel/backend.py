@@ -229,6 +229,64 @@ def create_default_config():
         return _err(str(exc))
 
 
+def install_driver_bundled():
+    """Install the MttVDD driver from the files carried in this exe.
+
+    Idempotent (no-ops when the device is already installed) and needs admin,
+    so the panel runs it through _need_admin.
+    """
+    if core is None:
+        return _err(CORE_ERROR)
+    r = core.install_driver_bundled()
+    return {"ok": r.get("ok", False), "out": r.get("out", ""),
+            "error": r.get("error", "")}
+
+
+def sunshine_status():
+    """Everything the streaming card needs. Read-only."""
+    if core is None:
+        return {"available": False}
+    return {
+        "installed": core.sunshine_installed(),
+        "conf_path": core.sunshine_conf_path(),
+        "settings": (core.read_conf_pairs(core.sunshine_conf_path())
+                     if core.sunshine_conf_path() else {}),
+        "virtual_device_id": core.sunshine_virtual_device_id(),
+    }
+
+
+def configure_sunshine():
+    """Point Sunshine at the virtual display (needs admin to write)."""
+    if core is None:
+        return _err(CORE_ERROR)
+    r = core.configure_sunshine_streaming()
+    return {"ok": r.get("ok", False), "out": r.get("out", ""),
+            "error": r.get("error", "")}
+
+
+def restart_sunshine_service():
+    if core is None:
+        return _err(CORE_ERROR)
+    if not is_admin():
+        return _err("需要管理员权限")
+    r = core.restart_sunshine()
+    return {"ok": r.get("ok", False), "out": r.get("out", ""),
+            "error": r.get("error", "")}
+
+
+def configure_sunshine_and_restart():
+    """One click: point Sunshine at the virtual display, then restart it."""
+    r = configure_sunshine()
+    if not r.get("ok"):
+        return r
+    rr = restart_sunshine_service()
+    if not rr.get("ok"):
+        r["out"] += "（配置已写入，请手动重启 Sunshine：托盘退出 -> 重开）"
+    else:
+        r["out"] += "，Sunshine 已重启"
+    return r
+
+
 def open_windows_display_settings():
     """Per-monitor scaling has no supported Win32 setter, so hand it off."""
     try:

@@ -858,6 +858,23 @@ class Main(QWidget):
             self._make_primary)
         bl2.addWidget(c5)
 
+        # ---- streaming (Sunshine) ----
+        c6, l6 = card("串流（Sunshine）")
+        self.lbl_ss_state = QLabel("—")
+        self.lbl_ss_state.setObjectName("Value")
+        l6.addWidget(self.lbl_ss_state)
+        self.lbl_ss_cfg = QLabel("—")
+        self.lbl_ss_cfg.setObjectName("Key")
+        self.lbl_ss_cfg.setWordWrap(True)
+        l6.addWidget(self.lbl_ss_cfg)
+        self.btn_stream = QPushButton("一键配置串流（串流时关闭物理屏）")
+        self.btn_stream.setObjectName("Primary")
+        self.btn_stream.setEnabled(False)
+        self.btn_stream.clicked.connect(
+            lambda: self._need_admin(backend.configure_sunshine_and_restart))
+        l6.addWidget(self.btn_stream)
+        bl2.addWidget(c6)
+
         # ---- active mode ----
         c2, l2 = card("虚拟屏分辨率（现在用哪个）")
         self.lbl_mode_hint = QLabel(
@@ -1020,7 +1037,12 @@ class Main(QWidget):
     def _banner_action(self):
         mode = self._st.get("_banner_mode")
         if mode == "install":
-            self._act(backend.start_install)
+            if backend.HAS_PROJECT:
+                self._act(backend.start_install)
+            else:
+                # a shared exe has no project folder: install from the driver
+                # files bundled inside it instead
+                self._need_admin(backend.install_driver_bundled)
         elif mode == "reload":
             self._need_admin(backend.reload_driver)
         elif mode == "config":
@@ -1201,6 +1223,7 @@ class Main(QWidget):
                 "font-size:11px;color:%s;" % C["danger"])
 
         self._apply_layout(s, vd, phys)
+        self._apply_streaming(s, vd)
 
     def _apply_layout(self, s, vd, phys):
         """Reflect the live multi-monitor state on the layout card."""
@@ -1241,6 +1264,39 @@ class Main(QWidget):
         self.lbl_layout_hint.setStyleSheet(
             "font-size:11px;color:%s;font-weight:600;"
             % (C["warning"] if topo == "virtual" else C["muted"]))
+
+    def _apply_streaming(self, s, vd):
+        """Reflect Sunshine's state on the streaming card."""
+        ss = backend.sunshine_status()
+        if not ss.get("installed"):
+            self.lbl_ss_state.setText("未安装 Sunshine（串流功能不可用）")
+            self.lbl_ss_state.setStyleSheet(
+                "font-size:11.5px;color:%s;" % C["muted"])
+            self.lbl_ss_cfg.setText("")
+            self.btn_stream.setEnabled(False)
+            return
+
+        st = ss.get("settings") or {}
+        out = st.get("output_name", "")
+        mode = st.get("dd_configuration_option", "disabled")
+        dev_id = ss.get("virtual_device_id")
+
+        if dev_id is None:
+            state = "已安装，但日志里还没有虚拟屏的 device_id（重启一次 Sunshine）"
+            col = C["warning"]
+        elif out == dev_id and mode == "ensure_only_display":
+            state = "已配置 ✓  串流时物理屏自动关闭"
+            col = C["success"]
+        else:
+            state = "未指向虚拟屏（当前捕获主屏）"
+            col = C["warning"]
+
+        self.lbl_ss_state.setText(state)
+        self.lbl_ss_state.setStyleSheet(
+            "font-size:11.5px;font-weight:600;color:%s;" % col)
+        self.lbl_ss_cfg.setText(
+            "output_name = %s\ndd_configuration_option = %s" % (out or "（未设）", mode))
+        self.btn_stream.setEnabled(dev_id is not None)
 
     def _show_banner(self, mode, text, btn_label):
         self._st["_banner_mode"] = mode
