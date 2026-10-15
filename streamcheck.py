@@ -12,6 +12,7 @@
 判定打印在最后一行，机器可读。
 """
 import argparse
+import ctypes
 import io
 import os
 import re
@@ -210,13 +211,81 @@ def watch(seconds, pause_checked):
     return 0
 
 
+def is_admin():
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return os.geteuid() == 0 if hasattr(os, "geteuid") else False
+
+
+def fix_service(wait=25):
+    """Recover from the zombie state you get by quitting Sunshine from the tray
+    while it runs as a Windows service: SCM still says Running, but the process
+    is stuck mid-shutdown and holds the files, so nothing listens and `net start`
+    does nothing at all.
+    """
+    if not is_admin():
+        print("fix-service 需要管理员（要 taskkill 服务进程并 net start）")
+        return 2
+    print("当前状态     :", ps("(Get-Service SunshineService).Status"))
+    print("卡住的进程   :", ps("Get-Process -ErrorAction SilentlyContinue | "
+                              "Where-Object { $_.ProcessName -match "
+                              "'^(sunshine|sunshinesvc)$' } | ForEach-Object { "
+                              "$_.ProcessName + ':' + $_.Id }").replace("\r\n", " ")
+          or "(无)")
+    ps("Stop-Service SunshineService -Force -ErrorAction SilentlyContinue")
+    for img in ("sunshinesvc.exe", "sunshine.exe"):
+        p = subprocess.run(["taskkill", "/IM", img, "/F"], capture_output=True)
+        msg = (p.stdout.decode("gbk", "replace")
+               + p.stderr.decode("gbk", "replace")).strip().replace("\r\n", " ")
+        print("  taskkill %-18s rc=%d : %s" % (img, p.returncode, msg[:90]))
+    still = ps("Get-Process -ErrorAction SilentlyContinue | Where-Object { "
+               "$_.ProcessName -match '^(sunshine|sunshinesvc)$' } | "
+               "ForEach-Object { $_.ProcessName + ':' + $_.Id }").replace("\r\n", " ")
+    print("强杀后残留   :", still or "(无)")
+    # wait for SCM to notice the process is gone, otherwise it stays "Running"
+    for _ in range(wait):
+        time.sleep(1)
+        if ps("(Get-Service SunshineService).Status") == "Stopped":
+            break
+    print("复位后状态   :", ps("(Get-Service SunshineService).Status"))
+    # After a force-kill Windows holds the image a while; starting too soon dies
+    # with system error 32 ("another process is using this file"). Back off and
+    # retry instead of giving up on the first attempt.
+    ok = False
+    out = ""
+    for attempt in range(1, 8):
+        time.sleep(8 if attempt == 1 else 10)
+        p = subprocess.run(["net", "start", "SunshineService"],
+                           capture_output=True)
+        out = (p.stdout.decode("gbk", "replace")
+               + p.stderr.decode("gbk", "replace")).strip().replace("\r\n", " | ")
+        ok = p.returncode == 0
+        print("启动 第 %d 次 rc=%d : %s" % (attempt, p.returncode, out[:100]))
+        if ok:
+            break
+    time.sleep(12)
+    tcp, _ = listeners()
+    up = {p for p, _ in tcp if p in TCP_PORTS}
+    print("TCP 监听     :", ", ".join(str(p) for p in sorted(up)) or "(无)")
+    if len(up) == len(TCP_PORTS):
+        print("VERDICT PASS 服务已恢复，四个端口齐全")
+        return 0
+    print("VERDICT FAIL 端口不齐，服务没真正起来")
+    return 1
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--watch", type=int, metavar="SEC",
                     help="采样 N 秒，期间在手机点连接，结束给判定")
     ap.add_argument("--pause-checked", action="store_true",
                     help="已人工确认 Sunshine 不是暂停状态（配合 --watch 使用）")
+    ap.add_argument("--fix-service", action="store_true",
+                    help="从托盘退出导致的僵尸态里恢复服务（需管理员）")
     a = ap.parse_args()
+    if a.fix_service:
+        return fix_service()
     report_static()
     if a.watch:
         return watch(a.watch, a.pause_checked)
