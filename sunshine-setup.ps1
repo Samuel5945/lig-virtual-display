@@ -121,10 +121,14 @@ Say "[3/4] virtual display found: $($vd.friendly_name)  $($vd.device_id)"
 # ---- 3. write the config ----------------------------------------------
 $lines = Get-Content -LiteralPath $conf
 # Only these two. Everything else is left exactly as it was: the default
-# revert behaviour already restores the display when the last session ends,
-# which is what we want, and every extra key is one more chance to get a
+# revert behaviour already restores the physical display when the last session
+# ends, which is what we want, and every extra key is one more chance to get a
 # value format wrong (dd_config_revert_on_disconnect, for instance, takes
 # true/false rather than the enabled/disabled used elsewhere).
+# ensure_only_display is chosen over ensure_active on purpose: the phone must
+# see the whole desktop, and in extend mode a window opened on the PC can land
+# on the physical monitor and be invisible to the phone. The cost is that the
+# topology is rewritten at session start, so a connect can need one retry.
 $want = @{
     'output_name'             = $vd.device_id
     'dd_configuration_option' = 'ensure_only_display'

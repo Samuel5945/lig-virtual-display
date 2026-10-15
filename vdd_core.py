@@ -549,8 +549,18 @@ def sunshine_virtual_device_id():
 
 
 def configure_sunshine_streaming():
-    """Point Sunshine at the virtual display and close the physical monitor
-    for the duration of a stream."""
+    """Point Sunshine at the virtual display and blank the physical monitor for
+    the duration of a stream.
+
+    ensure_only_display is deliberate, not an oversight: in extend mode a window
+    opened on the PC can land on the physical screen and then be invisible to the
+    phone, so the desktop has to live on the virtual display alone. The default
+    revert behaviour brings the physical monitor back once the last session ends.
+    Known cost: the topology is rewritten at session start and again ~3s after
+    each disconnect, which is not free -- a connect that lands in that window can
+    fail once and succeed on retry. ensure_active would avoid that churn, but it
+    leaves the desktop extended across both screens, which is worse in practice.
+    """
     cp = sunshine_conf_path()
     if not cp:
         return {"ok": False, "error": "本机未安装 Sunshine"}

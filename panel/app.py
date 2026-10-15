@@ -1284,8 +1284,13 @@ class Main(QWidget):
         if dev_id is None:
             state = "已安装，但日志里还没有虚拟屏的 device_id（重启一次 Sunshine）"
             col = C["warning"]
-        elif out == dev_id and mode == "ensure_only_display":
-            state = "已配置 ✓  串流时物理屏自动关闭"
+        elif out == dev_id and mode in ("ensure_active", "ensure_only_display"):
+            # ensure_only_display is what older builds wrote; it still points at
+            # the virtual screen, it just also blanks the physical one for the
+            # whole session.
+            tail = ("物理屏保持常亮" if mode == "ensure_active"
+                    else "串流时物理屏会黑")
+            state = "已配置 ✓  串流画面＝虚拟屏（%s）" % tail
             col = C["success"]
         else:
             state = "未指向虚拟屏（当前捕获主屏）"
