@@ -274,9 +274,23 @@ def restart_sunshine_service():
             "error": r.get("error", "")}
 
 
-def configure_sunshine_and_restart():
-    """One click: point Sunshine at the virtual display, then restart it."""
-    r = configure_sunshine()
+def configure_sunshine_follow():
+    """Let Windows decide what Sunshine captures (needs admin to write)."""
+    if core is None:
+        return _err(CORE_ERROR)
+    r = core.configure_sunshine_follow_display()
+    return {"ok": r.get("ok", False), "out": r.get("out", ""),
+            "error": r.get("error", "")}
+
+
+def set_stream_target(kind):
+    """Switch what the phone sees.
+
+    'virtual' forces the VDD display and blanks the physical monitor for the
+    duration of a stream; anything else hands the choice back to Windows.
+    Either way Sunshine has to restart before it re-reads the config.
+    """
+    r = configure_sunshine() if kind == "virtual" else configure_sunshine_follow()
     if not r.get("ok"):
         return r
     rr = restart_sunshine_service()
@@ -285,6 +299,11 @@ def configure_sunshine_and_restart():
     else:
         r["out"] += "，Sunshine 已重启"
     return r
+
+
+def configure_sunshine_and_restart():
+    """Kept for callers that only ever wanted the virtual-display target."""
+    return set_stream_target("virtual")
 
 
 def open_windows_display_settings():

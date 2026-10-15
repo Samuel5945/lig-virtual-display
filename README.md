@@ -11,9 +11,12 @@ v0.1 覆盖：
 - **控制**：`vdd.py` 命令行 + Qt6 面板（同一份 `vdd_core.py`，单一实现）
 - **面板**：深色无边框 UI；与 Windows 设置**实时联动**；多显示器布局
   （扩展 / 仅虚拟屏 / 仅物理屏 / 复制、虚拟屏摆位、主显示器）；真实像素分辨率与缩放显示
-- **串流（Sunshine）**：面板内一键配置 —— 自动从 Sunshine 日志解析虚拟屏的
-  device_id，写入 `output_name` + `ensure_only_display`，并重启 Sunshine 服务；
-  串流时物理屏自动关闭、断开后还原
+- **串流（Sunshine）**：面板内「串流画面」两态开关，切换会自动重启 Sunshine 生效
+  - **跟随系统**（默认）：不写 `output_name`、`dd_configuration_option = disabled`，
+    Sunshine 完全不碰显示拓扑，手机看到的就是 Windows 当前主屏，复制 / 扩展 /
+    仅第二屏由你在系统设置里定
+  - **虚拟屏**：从 Sunshine 日志解析虚拟屏 device_id，写入 `output_name` +
+    `ensure_only_display`，串流时物理屏自动关闭、断开后还原，适合外出使用
 - **可分享**：exe 内置 vdd_core/backend/应用图标/**驱动四件套 + 配置模板**，
   单文件拷到新机器即可装驱动并管理；设备实例号动态发现（不再绑定 0001）
 

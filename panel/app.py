@@ -861,7 +861,8 @@ class Main(QWidget):
         self.lbl_layout_hint.setWordWrap(True)
         l5.addWidget(self.lbl_layout_hint)
 
-        def seg_row(title, items, handler):
+        def seg_row(title, items, handler, target=None):
+            target = l5 if target is None else target
             wrap = QWidget(); wrap.setObjectName("Row")
             h = QHBoxLayout(wrap)
             h.setContentsMargins(0, 0, 0, 0)
@@ -878,7 +879,7 @@ class Main(QWidget):
                 h.addWidget(b)
                 btns[key] = b
             h.addStretch(1)
-            l5.addWidget(wrap)
+            target.addWidget(wrap)
             return btns
 
         self.topo_btns = seg_row(
@@ -908,12 +909,10 @@ class Main(QWidget):
         self.lbl_ss_cfg.setObjectName("Key")
         self.lbl_ss_cfg.setWordWrap(True)
         l6.addWidget(self.lbl_ss_cfg)
-        self.btn_stream = QPushButton("一键配置串流（串流时关闭物理屏）")
-        self.btn_stream.setObjectName("Primary")
-        self.btn_stream.setEnabled(False)
-        self.btn_stream.clicked.connect(
-            lambda: self._need_admin(backend.configure_sunshine_and_restart))
-        l6.addWidget(self.btn_stream)
+        self.ss_btns = seg_row(
+            "串流画面",
+            [("system", "跟随系统", False), ("virtual", "虚拟屏", False)],
+            self._set_stream_target, l6)
         bl2.addWidget(c6)
 
         # ---- active mode ----
@@ -1067,6 +1066,12 @@ class Main(QWidget):
                 self._flash("已取消管理员授权", C["warning"])
             return
         self._act(fn, *args)
+
+    def _set_stream_target(self, key):
+        """Point the stream at the virtual display, or hand it back to Windows.
+        Sunshine only re-reads its config on start, so this restarts the service.
+        """
+        self._need_admin(backend.set_stream_target, key)
 
     def _set_topo(self, key):
         # "only the virtual display" switches the physical monitor off - if the
@@ -1343,7 +1348,8 @@ class Main(QWidget):
             self.lbl_ss_state.setStyleSheet(
                 "font-size:11.5px;color:%s;" % C["muted"])
             self.lbl_ss_cfg.setText("")
-            self.btn_stream.setEnabled(False)
+            for b in self.ss_btns.values():
+                b.setEnabled(False)
             return
 
         st = ss.get("settings") or {}
@@ -1351,19 +1357,33 @@ class Main(QWidget):
         mode = st.get("dd_configuration_option", "disabled")
         dev_id = ss.get("virtual_device_id")
 
+        on_virtual = bool(dev_id) and out == dev_id and \
+            mode in ("ensure_active", "ensure_only_display")
+        # ensure_only_display is what older builds wrote; it still points at the
+        # virtual screen, it just also blanks the physical one for the session.
+        following = not out and mode == "disabled"
+
+        for key, b in self.ss_btns.items():
+            active = (key == "virtual") == on_virtual
+            if b.property("active") != active:
+                b.setProperty("active", active)
+                b.style().unpolish(b)
+                b.style().polish(b)
+            b.setEnabled(True if key == "system" else dev_id is not None)
+
         if dev_id is None:
             state = "已安装，但日志里还没有虚拟屏的 device_id（重启一次 Sunshine）"
             col = C["warning"]
-        elif out == dev_id and mode in ("ensure_active", "ensure_only_display"):
-            # ensure_only_display is what older builds wrote; it still points at
-            # the virtual screen, it just also blanks the physical one for the
-            # whole session.
+        elif on_virtual:
             tail = ("物理屏保持常亮" if mode == "ensure_active"
                     else "串流时物理屏会黑")
-            state = "已配置 ✓  串流画面＝虚拟屏（%s）" % tail
+            state = "虚拟屏 ✓  手机只看到虚拟屏（%s）" % tail
+            col = C["success"]
+        elif following:
+            state = "跟随系统 ✓  手机看到主屏，显示模式你在系统里怎么设就怎么串"
             col = C["success"]
         else:
-            state = "未指向虚拟屏（当前捕获主屏）"
+            state = "串流目标未明确：output_name=%s / %s" % (out or "未设", mode)
             col = C["warning"]
 
         self.lbl_ss_state.setText(state)
@@ -1371,7 +1391,6 @@ class Main(QWidget):
             "font-size:11.5px;font-weight:600;color:%s;" % col)
         self.lbl_ss_cfg.setText(
             "output_name = %s\ndd_configuration_option = %s" % (out or "（未设）", mode))
-        self.btn_stream.setEnabled(dev_id is not None)
 
     def _show_banner(self, mode, text, btn_label):
         self._st["_banner_mode"] = mode

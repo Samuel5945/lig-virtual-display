@@ -593,6 +593,44 @@ def configure_sunshine_streaming():
                    % dev_id}
 
 
+def configure_sunshine_follow_display():
+    """Hand the display choice back to Windows.
+
+    Sunshine stops managing the topology entirely: output_name goes away and
+    dd_configuration_option becomes disabled, which per Sunshine's own schema
+    also neutralises the other dd_* keys. Whatever the user picks in Settings
+    (extend / duplicate / second screen only) is then what the phone sees.
+    """
+    cp = sunshine_conf_path()
+    if not cp:
+        return {"ok": False, "error": "本机未安装 Sunshine"}
+    with open(cp, encoding="utf-8-sig", errors="replace") as f:
+        lines = f.read().split("\n")
+    out = []
+    had_mode = False
+    for line in lines:
+        m = re.match(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=", line)
+        key = m.group(1) if m else None
+        if key == "output_name":
+            continue                      # drop it: no fixed capture target
+        if key == "dd_configuration_option":
+            had_mode = True
+            out.append("dd_configuration_option = disabled")
+            continue
+        out.append(line)
+    if not had_mode:
+        out.append("dd_configuration_option = disabled")
+    txt = "\n".join(out)
+    if re.search(r"^\s*output_name\s*=", txt, re.M) or \
+            txt.count("dd_configuration_option = disabled") != 1:
+        return {"ok": False, "error": "改写后自检未通过，已放弃写入"}
+    with open(cp, "w", encoding="utf-8-sig", newline="\n") as f:
+        f.write(txt)
+    return {"ok": True,
+            "out": "已改为跟随系统显示模式（output_name 已移除、"
+                   "dd_configuration_option = disabled）"}
+
+
 def restart_sunshine():
     """Restart the Sunshine service (admin)."""
     rc, _o, _e = _run(["net", "stop", "SunshineService"])
