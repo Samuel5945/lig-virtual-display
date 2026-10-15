@@ -447,6 +447,42 @@ class Chevron(QLabel):
         return False
 
 
+class WheelNeedsFocus(QObject):
+    """Make the mouse wheel change a value only after you click the control.
+
+    Qt 6 gives QComboBox and QSpinBox a wheel handler with no focus check, so
+    a wheel that merely passes over one of them while you scroll the page
+    re-picks the resolution behind your back (measured on this machine: one
+    notch over an unfocused combo moved it 3 -> 6).
+
+    Two parts, and both are load-bearing:
+
+    * `Qt::WheelFocus` is what hands the control focus *before* the event
+      filters run, so a filter that only checks `hasFocus()` would always see
+      it armed. Dropping the bit to StrongFocus stops that. On its own the
+      policy change is not enough - measured, the value still moved.
+    * the filter then blocks the wheel until the control really has keyboard
+      focus, i.e. until it has been clicked. Ignoring rather than eating the
+      event lets it reach the scroll area, so the page still scrolls under the
+      cursor while the control stays put.
+
+    Qt does not own event filters, so the wrapper is parked on the widget too:
+    a filter whose Python side is collected stops running, silently.
+    """
+
+    def __init__(self, widget):
+        super().__init__(widget)
+        widget.setFocusPolicy(Qt.StrongFocus)
+        widget._wheel_guard = self
+        widget.installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Wheel and not obj.hasFocus():
+            ev.ignore()                                   # let the page scroll
+            return True                                   # but not this control
+        return False
+
+
 def apply_dark_palette(app):
     """Give Qt a dark palette.
 
@@ -713,6 +749,11 @@ class Main(QWidget):
         self.setMinimumHeight(720)
         self._threads = []
         self._st = {}
+        # A pick in the resolution combo (or a typed count) is a request, not a
+        # fact until 应用 runs. The poll rebuilds both from whatever the driver
+        # reports, so without these a pending value reverts under the cursor.
+        self._mode_pending = None
+        self._count_dirty = None
         self._build()
         self.reload()
 
@@ -888,6 +929,7 @@ class Main(QWidget):
         self.cmb_mode = QComboBox()
         self.cmb_mode.setMinimumWidth(180)
         Chevron(self.cmb_mode)
+        WheelNeedsFocus(self.cmb_mode)
         r.addWidget(self.cmb_mode, 1)
         self.btn_apply = QPushButton("应用")
         self.btn_apply.setObjectName("Primary")
@@ -933,6 +975,11 @@ class Main(QWidget):
         ra.addStretch(1)
         l3.addLayout(ra)
 
+        # Same misfire as the resolution combo: one stray notch over 数量/宽/高
+        # silently rewrites the driver config numbers.
+        for spin in (self.spn_count, self.spn_w, self.spn_h, self.spn_hz):
+            WheelNeedsFocus(spin)
+
         rr = QHBoxLayout()
         self.btn_reload = QPushButton("重载驱动，让上面的改动生效")
         self.btn_reload.setObjectName("Danger")
@@ -958,6 +1005,8 @@ class Main(QWidget):
         # ---- signals ----
         self.btn_apply.clicked.connect(self._apply_mode)
         self.btn_count.clicked.connect(self._apply_count)
+        self.cmb_mode.activated.connect(self._mode_picked)
+        self.spn_count.valueChanged.connect(self._count_edited)
         self.btn_add_res.clicked.connect(self._add_res)
         self.btn_reload.clicked.connect(self._reload)
         self.btn_cfgdir.clicked.connect(lambda: self._act(backend.open_config_dir))
@@ -984,6 +1033,17 @@ class Main(QWidget):
         self.pill.setStyleSheet(
             "QLabel#Pill { font-size:11px; font-weight:600; padding:2px 10px;"
             "border-radius:9px; color:%s; background-color:#1e232c; }" % color)
+
+    def _mode_picked(self, _index):
+        """Keep a combo pick (popup, keyboard or wheel) as the shown choice.
+
+        'activated' only fires on user interaction, so the poll's own
+        setCurrentIndex never marks anything pending.
+        """
+        self._mode_pending = self.cmb_mode.currentData()
+
+    def _count_edited(self, value):
+        self._count_dirty = value
 
     def _apply_mode(self):
         data = self.cmb_mode.currentData()
@@ -1174,16 +1234,23 @@ class Main(QWidget):
         self.cmb_mode.blockSignals(True)
         self.cmb_mode.clear()
         cur = (vd["width"], vd["height"], vd["hz"]) if vd else None
-        for m in s.get("modes", []):
+        modes = s.get("modes", [])
+        for m in modes:
             self.cmb_mode.addItem("%dx%d @ %dHz" % m, m)
-        if cur:
+        # follow the driver, except while the user has a pick waiting for 应用 -
+        # otherwise a refresh (the display state changed under them) reverts
+        # the selection they are about to apply
+        if self._mode_pending == cur or self._mode_pending not in modes:
+            self._mode_pending = None
+        want = self._mode_pending or cur
+        if want:
             for i in range(self.cmb_mode.count()):
-                if self.cmb_mode.itemData(i) == cur:
+                if self.cmb_mode.itemData(i) == want:
                     self.cmb_mode.setCurrentIndex(i)
                     break
-        self.cmb_mode.setEnabled(bool(s.get("modes")))
+        self.cmb_mode.setEnabled(bool(modes))
         self.cmb_mode.blockSignals(False)
-        self.btn_apply.setEnabled(bool(s.get("modes")))
+        self.btn_apply.setEnabled(bool(modes))
 
         # keep both hints honest about the live state, so the two cards are
         # self-explanatory instead of leaving the user to work out which one
@@ -1191,16 +1258,19 @@ class Main(QWidget):
         if s.get("modes"):
             self.lbl_mode_hint.setText(
                 "\u3000\u3000从下面 %d 个模式里挑一个，虚拟屏立即切过去，"
-                "不需要重载驱动，也不影响物理显示器。" % len(s["modes"]))
+                "不需要重载驱动，也不影响物理显示器。"
+                "点一下下拉框选中后，滚轮可以直接翻页。" % len(s["modes"]))
         else:
             self.lbl_mode_hint.setText(
                 "\u3000\u3000驱动已安装但没检测到虚拟屏，暂时没有可选模式。"
                 "先到下面的「驱动配置」确认设置，再重载驱动。")
 
         if cfg:
-            self.spn_count.blockSignals(True)
-            self.spn_count.setValue(cfg["count"])
-            self.spn_count.blockSignals(False)
+            if self._count_dirty in (None, cfg["count"]):
+                self.spn_count.blockSignals(True)
+                self.spn_count.setValue(cfg["count"])
+                self.spn_count.blockSignals(False)
+                self._count_dirty = None
             self._rebuild_res_rows(cfg["resolutions"])
 
             actual = s.get("virtual_count", 0)
