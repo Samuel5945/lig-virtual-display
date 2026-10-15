@@ -148,8 +148,11 @@ foreach ($k in $want.Keys) {
     if (-not $seen.ContainsKey($k)) { $out += "$k = $($want[$k])" }
 }
 
-$utf8bom = New-Object System.Text.UTF8Encoding $true
-[System.IO.File]::WriteAllLines($conf, [string[]]$out, $utf8bom)
+# Write WITHOUT a BOM: Sunshine does not strip one, so a BOM glues itself onto
+# the first key and that option is silently dropped ("Unrecognized configurable
+# option [address_family]"). Observed on this machine.
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+[System.IO.File]::WriteAllLines($conf, [string[]]$out, $utf8NoBom)
 Say '      config updated:'
 Say "        output_name = $($vd.device_id)"
 Say '        dd_configuration_option = ensure_only_display'

@@ -586,7 +586,9 @@ def configure_sunshine_streaming():
     for k, v in want.items():
         if not seen.get(k):
             out.append("%s = %s" % (k, v))
-    with open(cp, "w", encoding="utf-8-sig", newline="\n") as f:
+    # utf-8, not utf-8-sig: Sunshine does not strip a BOM, so a BOM glues itself
+    # onto the first key and that option is dropped as "Unrecognized".
+    with open(cp, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(out))
     return {"ok": True,
             "out": "output_name = %s\ndd_configuration_option = ensure_only_display"
@@ -624,7 +626,9 @@ def configure_sunshine_follow_display():
     if re.search(r"^\s*output_name\s*=", txt, re.M) or \
             txt.count("dd_configuration_option = disabled") != 1:
         return {"ok": False, "error": "改写后自检未通过，已放弃写入"}
-    with open(cp, "w", encoding="utf-8-sig", newline="\n") as f:
+    # utf-8, not utf-8-sig: Sunshine does not strip a BOM, so a BOM glues itself
+    # onto the first key and that option is dropped as "Unrecognized".
+    with open(cp, "w", encoding="utf-8", newline="\n") as f:
         f.write(txt)
     return {"ok": True,
             "out": "已改为跟随系统显示模式（output_name 已移除、"
