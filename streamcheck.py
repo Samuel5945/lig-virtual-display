@@ -155,7 +155,13 @@ def wlan_tx(prev, dt):
     return max(0.0, (n - prev) * 8.0 / 1e6 / max(dt, 0.001)), n
 
 
-def watch(seconds):
+def watch(seconds, pause_checked):
+    if not pause_checked:
+        print("拒绝开始采样：我无法自动判断 Sunshine 是否处于暂停。")
+        print("  paused 不写日志、不写配置；mTLS 读 serverstatus 需要配对客户端证书，")
+        print("  Web UI 的 /api/state 需要登录密码。两条都没有，所以只能人工确认。")
+        print("  看一眼托盘或 Web UI 首页，确认不是暂停状态，再加 --pause-checked 重跑。")
+        return 2
     target = None
     bitrate = last_bitrate()
     if bitrate:
@@ -189,7 +195,8 @@ def watch(seconds):
     print("UDP 通道峰值 :", sorted(seen_udp) or "(从未出现)")
     print("WLAN 发送峰值: %.1f Mbps" % peak)
     if not connected:
-        print("VERDICT FAIL 没采到会话：Sunshine 可能被暂停、地址不对，或窗口内没点。")
+        print("VERDICT FAIL 窗口内没有会话发生。按概率排序：Sunshine 处于暂停（最常见，")
+        print("  且服务状态仍显示 Running，两者互不矛盾）、地址不对、或根本没点。")
         return 2
     if len({47998, 47999, 48000} & seen_udp) < 3:
         print("VERDICT FAIL UDP 47998/47999/48000 没有全部建立：主机侧网络栈问题。")
@@ -207,10 +214,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--watch", type=int, metavar="SEC",
                     help="采样 N 秒，期间在手机点连接，结束给判定")
+    ap.add_argument("--pause-checked", action="store_true",
+                    help="已人工确认 Sunshine 不是暂停状态（配合 --watch 使用）")
     a = ap.parse_args()
     report_static()
     if a.watch:
-        return watch(a.watch)
+        return watch(a.watch, a.pause_checked)
     print("\n（静态体检看不到会话期间的证据。要抓真凭据就跑："
           "python streamcheck.py --watch 60）")
     return 0
