@@ -19,7 +19,8 @@ import shutil
 
 ROOT = r"C:\VirtualDisplay"
 REL = os.path.join(ROOT, "release")
-NAME = "VirtualDisplay-v0.1"
+VERSION = "v0.2.0"          # keep in sync with the badge at the top of README.md
+NAME = "VirtualDisplay-" + VERSION
 DEST = os.path.join(REL, NAME)
 
 EXE_CANDIDATES = [
@@ -83,7 +84,7 @@ print("结果: 完整 ✓   共 %d 个文件, %.1f MB" % (
     sum(len(fs) for _, _, fs in os.walk(DEST)), total / 1024 / 1024))
 print("位置:", DEST)
 print()
-print("分享方式：把整个 VirtualDisplay-v0.1 文件夹发给对方。")
+print("分享方式：把整个 %s 文件夹发给对方。" % NAME)
 print("对方步骤：1) 右键 install-driver.bat -> 以管理员身份运行")
 print("          2) 双击 虚拟显示器.exe")
 print("          3) 串流需再跑 sunshine-setup.bat（在对方那台机器上配）")
