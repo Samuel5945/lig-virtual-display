@@ -60,11 +60,24 @@ def cmd_status(argv=None):
             tags.append("VIRTUAL")
         if not d["attached"]:
             tags.append("detached")
-        print("  %-13s %4dx%-5d @%3dHz  %-16s %s"
+        print("  %-13s %4dx%-5d @%3dHz  %-16s @(%6d,%5d) %s"
               % (d["device"], d["width"], d["height"], d["hz"],
-                 " ".join(tags), d["adapter"][:30]))
+                 " ".join(tags), d["x"], d["y"], d["adapter"][:26]))
     print()
     print("virtual displays :", s["virtual_count"])
+    if s.get("virtual_side"):
+        print("virtual side     :", s["virtual_side_label"]
+              + ("" if s.get("virtual_side_exact") else "  (不在标准摆位，偏向该侧)"))
+    # Same sentence the panel prints, from the same core function: the CLI must
+    # not be the place where "跟随系统" still reads like "the whole desktop".
+    try:
+        if c.sunshine_installed():
+            conf = c.sunshine_conf_path()
+            tgt = c.capture_target(c.read_conf_pairs(conf) if conf else {},
+                                   s["displays"])
+            print("phone sees       :", tgt.get("label", "?"), "-", tgt.get("note", ""))
+    except Exception as exc:                                       # noqa: BLE001
+        print("phone sees       : 读不到（%s）" % exc)
     return 0 if s["device_installed"] else 1
 
 

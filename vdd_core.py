@@ -521,6 +521,49 @@ def read_conf_pairs(path):
     return out
 
 
+def _log_text(limit=None):
+    """Sunshine's log as text, optionally only the first `limit` bytes."""
+    lp = sunshine_log_path()
+    if not lp or not os.path.exists(lp):
+        return ""
+    try:
+        with open(lp, "rb") as f:
+            data = f.read(limit) if limit else f.read()
+    except OSError:
+        return ""
+    return data.decode("utf-8", "replace")
+
+
+def sunshine_displays():
+    """Sunshine's own enumeration of the monitors (newest block in the log).
+
+    Each entry carries device_id, display_name, friendly_name and the geometry
+    it saw. This is the only place output_name can be resolved back to a screen
+    Windows can name.
+
+    Read the head, not the file: the block is printed once at startup, and this
+    box's log is currently 1.7 GB of verbose encoder spam while the panel asks
+    every 3 seconds. Measured: the marker sits at byte 44,490 of today's log.
+    If the head has no complete block (a rotated log, or one truncated
+    mid-write), fall back to reading the whole thing.
+    """
+    pat = re.compile(re.escape(MARK) + r"\s*(\[.*?\n\])", re.S)
+
+    def last_block(txt):
+        blocks = pat.findall(txt)
+        if not blocks:
+            return None
+        try:
+            return json.loads(blocks[-1])
+        except ValueError:
+            return None
+
+    devs = last_block(_log_text(4_000_000))
+    if devs is None:
+        devs = last_block(_log_text())
+    return devs or []
+
+
 def sunshine_virtual_device_id():
     """The virtual display's device_id as Sunshine reports it.
 
@@ -528,24 +571,64 @@ def sunshine_virtual_device_id():
     output_name above); the log is truncated on every start, so the last block
     in the current log is what matters.
     """
-    lp = sunshine_log_path()
-    if not lp or not os.path.exists(lp):
-        return None
-    with open(lp, encoding="utf-8", errors="replace") as f:
-        txt = f.read()
-    blocks = re.findall(re.escape(MARK) + r"\s*(\[.*?\n\])", txt, re.S)
-    if not blocks:
-        return None
-    try:
-        devs = json.loads(blocks[-1])
-    except ValueError:
-        return None
-    for dv in devs:
+    for dv in sunshine_displays():
         ed = dv.get("edid") or {}
         if ed.get("manufacturer_id") == "MTT" or \
            "MTT" in (dv.get("friendly_name") or ""):
             return dv.get("device_id")
     return None
+
+
+def display_kind(d):
+    return "虚拟屏" if d.get("virtual") else "物理屏"
+
+
+def describe_display(d):
+    if not d:
+        return "无"
+    return "%s %s %dx%d%s" % (
+        display_kind(d), d.get("device", "?"), d.get("width", 0),
+        d.get("height", 0), "·主屏" if d.get("primary") else "")
+
+
+def capture_target(settings=None, displays=None):
+    """Which screen the phone actually sees.
+
+    Sunshine duplicates exactly ONE display per session: the one output_name
+    names, or - when output_name is empty - the primary. "跟随系统" therefore
+    does not mean "the whole desktop": a window dragged onto the other screen
+    stays off the phone. That gap is the most misunderstood part of this setup,
+    so it gets stated as a fact naming the screen rather than as a mode.
+    """
+    if displays is None:
+        displays = list_displays()
+    attached = [d for d in displays if d.get("attached")]
+    if not attached:
+        return {"kind": "none", "display": None, "label": "没有接好的显示器",
+                "note": "", "others": []}
+    st = settings or {}
+    out = (st.get("output_name") or "").strip()
+    named = None
+    if out:
+        smap = {dv.get("device_id"): dv.get("display_name")
+                for dv in sunshine_displays()}
+        dev = smap.get(out)
+        named = next((d for d in attached if d["device"] == dev), None)
+        if named is None:
+            return {"kind": "stale", "display": None,
+                    "label": "output_name = %s" % out,
+                    "note": "Sunshine 钉的那块屏当前不在位（重启过或换过分辨率），"
+                            "串流可能黑屏或抓到别处",
+                    "others": [describe_display(d) for d in attached]}
+    target = named or next((d for d in attached if d["primary"]), attached[0])
+    return {
+        "kind": "named" if named else "primary",
+        "display": target,
+        "label": describe_display(target),
+        "note": ("output_name 钉死了这块屏" if named
+                 else "「跟随系统」抓的是主显示器这一块，不是整个桌面"),
+        "others": [describe_display(d) for d in attached if d is not target],
+    }
 
 
 def configure_sunshine_streaming():
@@ -783,6 +866,23 @@ def set_position(device, x, y):
     return {"ok": True, "out": "%s 移到 (%d, %d)" % (device, x, y)}
 
 
+def side_position(virtual, ref, side):
+    """Where (x, y) `virtual` must go to sit on `side` of `ref`.
+
+    Shared by place_beside and the panel's schematic, so the ghost the user
+    clicks and the coordinate Windows actually writes cannot drift apart.
+    """
+    if side == "right":
+        return (ref["x"] + ref["width"], ref["y"])
+    if side == "left":
+        return (ref["x"] - virtual["width"], ref["y"])
+    if side == "above":
+        return (ref["x"], ref["y"] - virtual["height"])
+    if side == "below":
+        return (ref["x"], ref["y"] + ref["height"])
+    return None
+
+
 def place_beside(device, side):
     """Put the virtual display to the left/right/above/below the primary."""
     virtual = None
@@ -799,17 +899,50 @@ def place_beside(device, side):
     ref = [d for d in others if d["primary"]] or others
     r = ref[0]
 
-    if side == "right":
-        pos = (r["x"] + r["width"], r["y"])
-    elif side == "left":
-        pos = (r["x"] - virtual["width"], r["y"])
-    elif side == "above":
-        pos = (r["x"], r["y"] - virtual["height"])
-    elif side == "below":
-        pos = (r["x"], r["y"] + r["height"])
-    else:
+    pos = side_position(virtual, r, side)
+    if pos is None:
         return {"ok": False, "error": "unknown side: %s" % side}
     return set_position(device, pos[0], pos[1])
+
+
+SIDE_LABELS = {"left": "在左侧", "right": "在右侧",
+               "above": "在上方", "below": "在下方"}
+
+
+def reference_display(displays, virtual):
+    """The screen `place_beside` measures from: the primary that is not the
+    virtual one, else the first attached display that is not."""
+    others = [d for d in displays
+              if d["attached"] and d["device"] != virtual["device"]]
+    if not others:
+        return None
+    return ([d for d in others if d["primary"]] or others)[0]
+
+
+def virtual_side(displays=None):
+    """(side, exact) for where the virtual screen sits, or (None, False).
+
+    The inverse of place_beside. The panel has to light up the button that
+    matches reality, and Windows happily keeps a half-dragged layout, so
+    `exact` says whether it is actually on the snap position or merely leaning
+    that way.
+    """
+    if displays is None:
+        displays = list_displays()
+    vd = next((d for d in displays if d["attached"] and d["virtual"]), None)
+    if vd is None:
+        return None, False
+    ref = reference_display(displays, vd)
+    if ref is None:
+        return None, False
+    for side in ("left", "right", "above", "below"):
+        if (vd["x"], vd["y"]) == side_position(vd, ref, side):
+            return side, True
+    cx = (vd["x"] + vd["width"] / 2.0) - (ref["x"] + ref["width"] / 2.0)
+    cy = (vd["y"] + vd["height"] / 2.0) - (ref["y"] + ref["height"] / 2.0)
+    if abs(cx) >= abs(cy):
+        return ("right" if cx > 0 else "left"), False
+    return ("below" if cy > 0 else "above"), False
 
 
 def make_primary(device):
@@ -914,6 +1047,8 @@ def status(light=False):
             vd = d
             break
 
+    side, side_exact = virtual_side(displays)
+
     phys = None
     for d in displays:
         if not d["virtual"] and d["attached"]:
@@ -931,6 +1066,10 @@ def status(light=False):
                              if d["virtual"] and d["attached"]),
         "physical": phys,
         "displays": displays,
+        "reference": reference_display(displays, vd) if vd else None,
+        "virtual_side": side,
+        "virtual_side_exact": side_exact,
+        "virtual_side_label": SIDE_LABELS.get(side, "未知"),
         "modes": available_modes(vd["device"]) if vd else [],
         "topology": current_topology(),
         "topology_labels": {k: v[1] for k, v in TOPOLOGIES.items()},

@@ -255,6 +255,37 @@ def sunshine_status():
     }
 
 
+def capture_target(settings, displays):
+    """Which screen the phone will see. The rule lives in vdd_core so the CLI
+    and streamcheck can state the same thing."""
+    if core is None:
+        return {}
+    try:
+        return core.capture_target(settings=settings, displays=displays)
+    except Exception:                                          # noqa: BLE001
+        return {}
+
+
+def side_position(virtual, ref, side):
+    """(x, y) the virtual screen would land on for that side - used by the
+    schematic to draw the ghost before the click happens."""
+    if core is None or virtual is None or ref is None:
+        return None
+    try:
+        return core.side_position(virtual, ref, side)
+    except Exception:                                          # noqa: BLE001
+        return None
+
+
+def describe_display(d):
+    if core is None:
+        return "无"
+    try:
+        return core.describe_display(d)
+    except Exception:                                          # noqa: BLE001
+        return "无"
+
+
 def configure_sunshine():
     """Point Sunshine at the virtual display (needs admin to write)."""
     if core is None:
