@@ -28,8 +28,13 @@
 
 | 附件 | 给谁 |
 |---|---|
-| `VirtualDisplay-v0.3.0.exe` | 本机已装过驱动，只想更新面板。下载后**改名为「虚拟显示器.exe」**替换旧的（发布页把中文名转成了 ASCII，内容同一份） |
-| `VirtualDisplay-v0.3.0.zip` | 新机器从零开始：含驱动文件、`install-driver.bat`、串流配置脚本和本 README |
+| `VirtualDisplay-v0.3.0.exe` | **新机器也只要这一个**。下载后改名为「虚拟显示器.exe」（发布页把中文名转成了 ASCII，内容同一份）。打开后检测到没驱动会弹横幅，点「安装驱动」即用 exe 自带的驱动文件装（弹 UAC）；已装过的机器直接替换旧 exe |
+| `VirtualDisplay-v0.3.0.zip` | 需要命令行和脚本时才下：`vdd.py` / `vdd_core.py`、`install-driver.bat`、`finish-setup.bat`、`sunshine-setup.bat`、驱动文件的磁盘副本和本 README |
+
+装驱动**不需要** zip —— exe 里带着 `MttVDD.inf/dll/cat` 与 `devcon.exe`，
+`install_driver_bundled()` 会把它们解到配置目录旁边再 `devcon install`，
+并且先查已存在的设备实例，重复点不会装出第二个 `ROOT\DISPLAY\000x`。
+zip 多出来的是命令行、串流配置脚本和文档。
 
 SHA-256（exe）：`857023cb3fee9805a7c84ffc9f4e82b3459836b4677c5e0358e2f1393d29783c`
 （zip 里就是这份 exe 加驱动与脚本，不单独校验；否则改一个字的文档都要重新算一次）

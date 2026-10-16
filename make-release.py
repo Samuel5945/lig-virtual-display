@@ -11,8 +11,10 @@ Everything a fresh PC needs, laid out the way the scripts expect:
         sunshine-setup.bat/.ps1     point Sunshine at the virtual display
         README.md
 
-Nothing here installs Python or the driver silently - the recipient still
-runs install-driver.bat (admin) on a machine that has no driver yet.
+Nothing here installs Python. It does not need to install the driver either:
+the panel exe carries the driver files and installs them itself (banner ->
+「安装驱动」, admin via UAC). `install-driver.bat` is the scripted alternative
+for people who would rather run it from an elevated prompt.
 """
 import os
 import shutil
@@ -84,7 +86,8 @@ print("结果: 完整 ✓   共 %d 个文件, %.1f MB" % (
     sum(len(fs) for _, _, fs in os.walk(DEST)), total / 1024 / 1024))
 print("位置:", DEST)
 print()
-print("分享方式：把整个 %s 文件夹发给对方。" % NAME)
-print("对方步骤：1) 右键 install-driver.bat -> 以管理员身份运行")
-print("          2) 双击 虚拟显示器.exe")
+print("分享方式：只发 虚拟显示器.exe 也够用（驱动由它自己装）；")
+print("          要命令行和串流脚本，再发整个 %s 文件夹。" % NAME)
+print("对方步骤：1) 双击 虚拟显示器.exe —— 没驱动时横幅上点「安装驱动」（弹 UAC）")
+print("          2) 想用脚本装：右键 install-driver.bat -> 以管理员身份运行")
 print("          3) 串流需再跑 sunshine-setup.bat（在对方那台机器上配）")
