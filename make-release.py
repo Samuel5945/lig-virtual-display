@@ -9,6 +9,7 @@ Everything a fresh PC needs, laid out the way the scripts expect:
         install-driver.bat          portable, finds .\driver itself
         finish-setup.bat            dedupe / reload helper
         sunshine-setup.bat/.ps1     point Sunshine at the virtual display
+        docs\images\                the screenshots README links to
         README.md
 
 Nothing here installs Python. It does not need to install the driver either:
@@ -64,6 +65,22 @@ for src, dst, required in FILES:
         continue
     shutil.copy2(src, os.path.join(DEST, dst))
     print("  ok  ", dst, "(%d KB)" % (os.path.getsize(src) // 1024))
+
+print()
+# README links its screenshots by relative path, so they have to travel with it
+# or the offline copy shows broken images.
+IMG_SRC = os.path.join(ROOT, "docs", "images")
+IMG_DST = os.path.join(DEST, "docs", "images")
+if os.path.isdir(IMG_SRC):
+    os.makedirs(IMG_DST, exist_ok=True)
+    for f in sorted(os.listdir(IMG_SRC)):
+        if not f.lower().endswith(".png"):
+            continue
+        shutil.copy2(os.path.join(IMG_SRC, f), os.path.join(IMG_DST, f))
+        print("  ok  ", "docs\\images\\" + f,
+              "(%d KB)" % (os.path.getsize(os.path.join(IMG_DST, f)) // 1024))
+else:
+    missing.append("docs\\images")
 
 print()
 for f in DRIVER_FILES:
