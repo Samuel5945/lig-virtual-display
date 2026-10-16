@@ -19,7 +19,7 @@ import shutil
 
 ROOT = r"C:\VirtualDisplay"
 REL = os.path.join(ROOT, "release")
-VERSION = "v0.2.0"          # keep in sync with the badge at the top of README.md
+VERSION = "v0.3.0"          # keep in sync with the badge at the top of README.md
 NAME = "VirtualDisplay-" + VERSION
 DEST = os.path.join(REL, NAME)
 

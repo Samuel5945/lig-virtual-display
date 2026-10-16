@@ -15,6 +15,7 @@
 import argparse
 import ctypes
 import io
+import json
 import os
 import re
 import socket
@@ -152,7 +153,7 @@ def report_static():
           if c["bom"] else "无 (ok)")
     print("address_family:", c["address_family"])
     print("dd_configuration_option:", c["dd_configuration_option"])
-    print("output_name  :", c["output_name"] or "(未设 -> 抓主屏，跟随系统显示模式)")
+    print("串流画面     :", claimed_target()["why"])
     tcp, udp = listeners()
     sun_tcp = sorted(p for p, _ in tcp if p in TCP_PORTS)
     sun_udp = sorted(p for p, _ in udp if p in UDP_PORTS)
@@ -488,18 +489,61 @@ def label_of(b):
 
 
 # -------------------------------------------------------- "what does the phone see"
+SUNSHINE_MARK = "Currently available display devices:"
+
+
+def sunshine_display_map():
+    """{device_id: (display_name, friendly_name, primary)} from the newest block.
+
+    Head-only read, same reason as vdd_core: the block is printed once at
+    startup and this box's log runs to gigabytes of encoder spam.
+    """
+    if not os.path.exists(LOG):
+        return {}
+    with open(LOG, "rb") as f:
+        head = f.read(4_000_000).decode("utf-8", "replace")
+    blocks = re.findall(re.escape(SUNSHINE_MARK) + r"\s*(\[.*?\n\])", head, re.S)
+    if not blocks:
+        return {}
+    try:
+        devs = json.loads(blocks[-1])
+    except ValueError:
+        return {}
+    return {d.get("device_id"): (d.get("display_name"), d.get("friendly_name"),
+                                 bool((d.get("info") or {}).get("primary")))
+            for d in devs}
+
+
 def claimed_target():
-    """What the panel/Sunshine config says the phone should see, plus the rule."""
+    """What the config claims the phone should see, resolved to a Windows screen.
+
+    Three states now, not two - 跟随系统 / 钉住物理屏 / 钉住虚拟屏 all differ only
+    in output_name and dd_configuration_option - so the claim has to be joined
+    against Sunshine's own enumeration before it can face the capture record.
+    """
     c = conf_facts()
     if not c.get("exists"):
-        return None, None, "conf 找不到"
-    out_name = c.get("output_name")
-    mode = c.get("dd_configuration_option")
+        return {"mode": "none", "device": None, "id": None, "dd": None,
+                "why": "conf 找不到"}
+    out_name = (c.get("output_name") or "").strip()
+    mode = (c.get("dd_configuration_option") or "disabled").strip()
     if out_name:
-        return "virtual", out_name, "串流画面=虚拟屏（output_name 已钉死那块屏）"
-    if mode in (None, "", "disabled"):
-        return "follow", None, "串流画面=跟随系统（output_name 未设 -> 抓主显示器那块）"
-    return "dd-%s" % mode, None, "dd_configuration_option=%s 但没写 output_name" % mode
+        ent = sunshine_display_map().get(out_name)
+        dev = ent[0] if ent else None
+        if dev:
+            b = next((x for x in display_boxes() if x[0] == dev), None)
+            kind = "虚拟屏" if b and DRIVER_MATCH in b[1] else "物理屏"
+            label = "钉住 %s（%s）" % (dev, kind)
+        else:
+            label = "钉住一个当前不在位的 id"
+        return {"mode": "pinned", "device": dev, "id": out_name, "dd": mode,
+                "why": "%s：output_name=%s…，dd_configuration_option=%s"
+                       % (label, out_name[:14], mode)}
+    if mode in ("", "disabled"):
+        return {"mode": "follow", "device": None, "id": None, "dd": mode,
+                "why": "串流画面=跟随系统（output_name 未设 -> 抓主显示器那块）"}
+    return {"mode": "dd-" + mode, "device": None, "id": None, "dd": mode,
+            "why": "dd_configuration_option=%s 但没写 output_name" % mode}
 
 
 def where_report():
@@ -513,8 +557,8 @@ def where_report():
     for b in boxes:
         print("    %-14s %-22s %dx%d @(%d,%d) %s"
               % (b[0], kind_of(b[1], b[2]), b[3], b[4], b[5], b[6], b[1][:22]))
-    kind, dev_id, why = claimed_target()
-    print("配置声称     :", why)
+    claim = claimed_target()
+    print("配置声称     :", claim["why"])
     if not os.path.exists(LOG):
         print("VERDICT FAIL 没有日志，没法证明实际抓了哪块屏")
         return 1
@@ -536,11 +580,22 @@ def where_report():
     print("   （判定依据：%s；同一场里共 %d 次抓取记录）" % (how, len(pairs)))
     is_virtual = box is not None and DRIVER_MATCH in (box[1] or "")
     is_primary = box is not None and bool(box[2])
-    if kind == "follow":
+    captured = box[0] if box else None
+    blank = claim["dd"] == "ensure_only_display"
+    if claim["mode"] == "pinned":
+        if captured and captured == claim["device"]:
+            print("VERDICT PASS 钉住的屏和被抓的屏是同一块（%s）；另一块屏%s。"
+                  % (captured, "串流期间会黑（ensure_only_display）" if blank
+                     else "照常可用（disabled）"))
+            return 0
+        print("VERDICT FAIL 声称钉住 %s，实测抓的是 %s —— 两者对不上，"
+              "面板那行「手机看到」不能信。" % (claim["device"] or "(id 不在位)", label))
+        return 1
+    if claim["mode"] == "follow":
         if is_primary and not is_virtual:
             print("VERDICT PASS 抓的是主显示器（物理屏），和「跟随系统」的说法一致。"
-                  "手机看不到虚拟屏是这套配置的预期行为；要让手机看虚拟屏，"
-                  "要么「串流画面=虚拟屏」，要么把主显示器改成虚拟屏。")
+                  "手机看不到另一块屏是这套配置的预期行为；要它看虚拟屏，"
+                  "用「串流画面=虚拟屏」，或把主显示器改成虚拟屏。")
             return 0
         if is_virtual and is_primary:
             print("VERDICT PASS 主显示器当前就是虚拟屏，所以「跟随系统」抓到的正是虚拟屏。")
@@ -548,16 +603,7 @@ def where_report():
         print("VERDICT FAIL 声称跟随系统（应抓主屏），实测抓的是 %s —— 主屏判据对不上，"
               "这套说法不能再用。" % label)
         return 1
-    if kind == "virtual":
-        if is_virtual:
-            print("VERDICT PASS output_name 指向虚拟屏，实测抓的也是虚拟屏（output_id=%s）。"
-                  % dev_id)
-            return 0
-        print("VERDICT FAIL output_name 钉了虚拟屏 %s，实测抓的却是 %s —— "
-              "那个 id 在当前接好的屏里找不到，八成是重启/换分辨率后失效了。"
-              % (dev_id, label))
-        return 1
-    print("VERDICT FAIL 配置状态没法解释（%s），先别信面板" % why)
+    print("VERDICT FAIL 配置状态没法解释（%s），先别信面板" % claim["why"])
     return 1
 
 

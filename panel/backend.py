@@ -252,6 +252,7 @@ def sunshine_status():
         "settings": (core.read_conf_pairs(core.sunshine_conf_path())
                      if core.sunshine_conf_path() else {}),
         "virtual_device_id": core.sunshine_virtual_device_id(),
+        "display_ids": core.sunshine_display_ids(),
     }
 
 
@@ -314,14 +315,35 @@ def configure_sunshine_follow():
             "error": r.get("error", "")}
 
 
-def set_stream_target(kind):
-    """Switch what the phone sees.
+def set_stream_target(target, keep_others=True):
+    """Choose which screen the phone sees, and what the other one does.
 
-    'virtual' forces the VDD display and blanks the physical monitor for the
-    duration of a stream; anything else hands the choice back to Windows.
-    Either way Sunshine has to restart before it re-reads the config.
+    ``target``: 'system' | 'physical' | 'virtual'.
+    ``keep_others``: True leaves the rest of the desktop alone; False makes
+    Sunshine keep only the pinned screen active for the duration of the session
+    (and revert when the last client leaves). 'system' ignores it - handing the
+    choice back to Windows means not managing the topology at all.
+
+    Sunshine only re-reads its config on start, so every path restarts it.
     """
-    r = configure_sunshine() if kind == "virtual" else configure_sunshine_follow()
+    if core is None:
+        return _err(CORE_ERROR)
+    try:
+        ids = core.sunshine_display_ids()
+    except Exception as exc:                                       # noqa: BLE001
+        return _err(str(exc))
+    if target == "system":
+        dev, dd = None, core.STREAM_KEEP_OTHERS
+    elif target in ("physical", "virtual"):
+        dev = ids.get(target)
+        if not dev:
+            return _err("Sunshine 日志里还没有%s的 device_id —— 先重启一次 Sunshine"
+                        % ("物理屏" if target == "physical" else "虚拟屏"))
+        dd = (core.STREAM_KEEP_OTHERS if keep_others
+              else core.STREAM_BLANK_OTHERS)
+    else:
+        return _err("不认识的串流目标：%s" % target)
+    r = core.set_stream_output(dev, dd)
     if not r.get("ok"):
         return r
     rr = restart_sunshine_service()

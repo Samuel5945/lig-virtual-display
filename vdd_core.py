@@ -158,6 +158,7 @@ ENUM_CURRENT_SETTINGS = -1
 CDS_UPDATEREGISTRY = 0x00000001
 CDS_TEST = 0x00000002
 CDS_SET_PRIMARY = 0x00000010
+CDS_NORESET = 0x10000000       # stage this change; apply the batch with a NULL call
 DISP_CHANGE_SUCCESSFUL = 0
 DISP_CHANGE_BADMODE = -2
 DISP_CHANGE_FAILED = -1
@@ -621,61 +622,118 @@ def capture_target(settings=None, displays=None):
                             "串流可能黑屏或抓到别处",
                     "others": [describe_display(d) for d in attached]}
     target = named or next((d for d in attached if d["primary"]), attached[0])
+    mode = (st.get("dd_configuration_option") or "disabled").strip()
+    if named:
+        blank = mode == "ensure_only_display"
+        note = ("钉住这块屏，串流期间另一块屏会黑" if blank
+                else "钉住这块屏，另一块屏照常可用，只是手机看不到它")
+    else:
+        blank = False
+        note = "「跟随系统」抓的是主显示器这一块，不是整个桌面"
     return {
         "kind": "named" if named else "primary",
         "display": target,
         "label": describe_display(target),
-        "note": ("output_name 钉死了这块屏" if named
-                 else "「跟随系统」抓的是主显示器这一块，不是整个桌面"),
+        "note": note,
+        "dd_option": mode,
+        "blanks_others": blank,
         "others": [describe_display(d) for d in attached if d is not target],
     }
 
 
-def configure_sunshine_streaming():
-    """Point Sunshine at the virtual display and blank the physical monitor for
-    the duration of a stream.
+STREAM_KEEP_OTHERS = "disabled"               # 另一块屏照常可用，只是手机看不到它
+STREAM_BLANK_OTHERS = "ensure_only_display"   # 串流期间只留被钉那块，断开自动还原
 
-    ensure_only_display is deliberate, not an oversight: in extend mode a window
-    opened on the PC can land on the physical screen and then be invisible to the
-    phone, so the desktop has to live on the virtual display alone. The default
-    revert behaviour brings the physical monitor back once the last session ends.
-    Known cost: the topology is rewritten at session start and again ~3s after
-    each disconnect, which is not free -- a connect that lands in that window can
-    fail once and succeed on retry. ensure_active would avoid that churn, but it
-    leaves the desktop extended across both screens, which is worse in practice.
+
+def sunshine_display_ids(displays=None):
+    """{'physical': id, 'virtual': id} - Sunshine's own device ids, either may be None.
+
+    The ids only exist in Sunshine's startup enumeration (its log); the Windows
+    side is what says which of those screens is attached and which one is the
+    VDD. display_name is the only join between the two, so an id is reported
+    only when the screen it names is actually attached right now.
+    """
+    if displays is None:
+        displays = list_displays()
+    attached = {d["device"]: d for d in displays if d.get("attached")}
+    ids = {"physical": None, "virtual": None}
+    for dv in sunshine_displays():
+        d = attached.get(dv.get("display_name"))
+        if not d:
+            continue
+        kind = "virtual" if d["virtual"] else "physical"
+        if ids[kind] is None:
+            ids[kind] = dv.get("device_id")
+    return ids
+
+
+def set_stream_output(dev_id, dd_option=STREAM_KEEP_OTHERS):
+    """Write the capture target and the other-screen policy as one atomic edit.
+
+    ``dev_id=None`` removes output_name, which hands the choice back to Windows
+    (Sunshine then duplicates the primary). ``dd_option`` is Sunshine's
+    dd_configuration_option: 'disabled' leaves the topology alone,
+    'ensure_only_display' keeps only the pinned screen active for the duration
+    of the session and reverts when the last client leaves.
+
+    The old pair of functions did this with two near-identical copies of the
+    same writer, and only one of them self-checked the result - which is how
+    「跟随系统」 once ended up writing a half-edited config. Assert first, write
+    second, no BOM (Sunshine reads a BOM as part of the first key's name).
     """
     cp = sunshine_conf_path()
     if not cp:
         return {"ok": False, "error": "本机未安装 Sunshine"}
+    with open(cp, encoding="utf-8-sig", errors="replace") as f:
+        lines = f.read().split("\n")
+    want = {"dd_configuration_option": dd_option}
+    if dev_id:
+        want["output_name"] = dev_id
+    seen, out = set(), []
+    for line in lines:
+        m = re.match(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=", line)
+        key = m.group(1) if m else None
+        if key == "output_name" and not dev_id:
+            continue                       # drop it: no fixed capture target
+        if key in want:
+            seen.add(key)
+            out.append("%s = %s" % (key, want[key]))
+        else:
+            out.append(line)
+    for k, v in want.items():
+        if k not in seen:
+            out.append("%s = %s" % (k, v))
+    txt = "\n".join(out)
+    has_out = bool(re.search(r"^\s*output_name\s*=", txt, re.M))
+    if has_out != bool(dev_id):
+        return {"ok": False, "error": "改写后自检未通过（output_name），已放弃写入"}
+    if txt.count("dd_configuration_option = %s" % dd_option) != 1:
+        return {"ok": False, "error": "改写后自检未通过（dd_configuration_option），已放弃写入"}
+    with open(cp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(txt)
+    return {"ok": True,
+            "out": "output_name = %s\ndd_configuration_option = %s"
+                   % (dev_id or "（已移除，抓主显示器）", dd_option)}
+
+
+def configure_sunshine_streaming():
+    """Legacy entry point: pin the virtual screen and blank the others.
+
+    ensure_only_display is a deliberate choice, not an oversight: in extend mode
+    a window opened on the PC can land on the physical screen and then be
+    invisible to the phone, so the desktop has to live on the virtual display
+    alone, and the default revert brings the monitor back when the last session
+    ends. Known cost: the topology is rewritten at session start and again ~3s
+    after each disconnect, so a connect landing in that window can fail once and
+    succeed on retry. The panel now offers 'keep the other screen' as the
+    alternative (dd_configuration_option = disabled) instead of hard-coding this.
+    """
     dev_id = sunshine_virtual_device_id()
     if not dev_id:
         return {"ok": False,
                 "error": "Sunshine 日志里还没有虚拟屏的 device_id —— "
                          "先重启一次 Sunshine 再试"}
-    with open(cp, encoding="utf-8-sig", errors="replace") as f:
-        lines = f.read().split("\n")
-    want = {"output_name": dev_id,
-            "dd_configuration_option": "ensure_only_display"}
-    seen = {}
-    out = []
-    for line in lines:
-        m = re.match(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=", line)
-        if m and m.group(1) in want:
-            k = m.group(1)
-            seen[k] = True
-            out.append("%s = %s" % (k, want[k]))
-        else:
-            out.append(line)
-    for k, v in want.items():
-        if not seen.get(k):
-            out.append("%s = %s" % (k, v))
-    # utf-8, not utf-8-sig: Sunshine does not strip a BOM, so a BOM glues itself
-    # onto the first key and that option is dropped as "Unrecognized".
-    with open(cp, "w", encoding="utf-8", newline="\n") as f:
-        f.write("\n".join(out))
-    return {"ok": True,
-            "out": "output_name = %s\ndd_configuration_option = ensure_only_display"
-                   % dev_id}
+    return set_stream_output(dev_id, STREAM_BLANK_OTHERS)
 
 
 def configure_sunshine_follow_display():
@@ -686,36 +744,7 @@ def configure_sunshine_follow_display():
     also neutralises the other dd_* keys. Whatever the user picks in Settings
     (extend / duplicate / second screen only) is then what the phone sees.
     """
-    cp = sunshine_conf_path()
-    if not cp:
-        return {"ok": False, "error": "本机未安装 Sunshine"}
-    with open(cp, encoding="utf-8-sig", errors="replace") as f:
-        lines = f.read().split("\n")
-    out = []
-    had_mode = False
-    for line in lines:
-        m = re.match(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*=", line)
-        key = m.group(1) if m else None
-        if key == "output_name":
-            continue                      # drop it: no fixed capture target
-        if key == "dd_configuration_option":
-            had_mode = True
-            out.append("dd_configuration_option = disabled")
-            continue
-        out.append(line)
-    if not had_mode:
-        out.append("dd_configuration_option = disabled")
-    txt = "\n".join(out)
-    if re.search(r"^\s*output_name\s*=", txt, re.M) or \
-            txt.count("dd_configuration_option = disabled") != 1:
-        return {"ok": False, "error": "改写后自检未通过，已放弃写入"}
-    # utf-8, not utf-8-sig: Sunshine does not strip a BOM, so a BOM glues itself
-    # onto the first key and that option is dropped as "Unrecognized".
-    with open(cp, "w", encoding="utf-8", newline="\n") as f:
-        f.write(txt)
-    return {"ok": True,
-            "out": "已改为跟随系统显示模式（output_name 已移除、"
-                   "dd_configuration_option = disabled）"}
+    return set_stream_output(None, STREAM_KEEP_OTHERS)
 
 
 def restart_sunshine():
@@ -946,26 +975,56 @@ def virtual_side(displays=None):
 
 
 def make_primary(device):
-    """Make a display the primary one (origin 0,0)."""
-    target = None
-    for d in list_displays():
-        if d["device"] == device:
-            target = d
-            break
+    """Make a display the primary one.
+
+    Measured on this box: a lone ChangeDisplaySettingsEx(CDS_SET_PRIMARY) for
+    the second screen returns DISP_CHANGE_SUCCESSFUL and changes *nothing* -
+    the current primary still occupies (0,0) and Windows refuses to move the
+    primary by itself. That is why the panel's 「主显示器 -> 虚拟屏」 button
+    reported success while the highlight jumped straight back. The two changes
+    have to be staged with CDS_NORESET and applied together in one batch.
+
+    The batch keeps the arrangement intact: every screen is translated by the
+    same amount so the new primary lands on (0,0) and nothing else moves
+    relative to anything else.
+    """
+    displays = list_displays()
+    attached = [d for d in displays if d["attached"]]
+    target = next((d for d in attached if d["device"] == device), None)
     if target is None:
         return {"ok": False, "error": "no such display: %s" % device}
+    if target["primary"]:
+        return {"ok": True, "out": "%s 已经是主显示器" % device}
 
-    dm = DEVMODEW()
-    dm.dmSize = ctypes.sizeof(DEVMODEW)
-    _user32.EnumDisplaySettingsW(device, ENUM_CURRENT_SETTINGS, ctypes.byref(dm))
-    dm.dmPositionX = 0
-    dm.dmPositionY = 0
-    dm.dmFields = DM_POSITION
-    rc = _user32.ChangeDisplaySettingsExW(
-        device, ctypes.byref(dm), None,
-        CDS_SET_PRIMARY | CDS_UPDATEREGISTRY, None)
+    others = [d for d in attached if d["device"] != device]
+    dx, dy = -target["x"], -target["y"]          # shift that puts target on (0,0)
+    plan = [(target, 0, 0, CDS_SET_PRIMARY)]
+    plan += [(d, d["x"] + dx, d["y"] + dy, 0) for d in others]
+
+    staged = []
+    for d, x, y, extra in plan:
+        dm = DEVMODEW()
+        dm.dmSize = ctypes.sizeof(dm)
+        if not _user32.EnumDisplaySettingsW(d["device"], ENUM_CURRENT_SETTINGS,
+                                            ctypes.byref(dm)):
+            return {"ok": False,
+                    "error": "读不到 %s 当前模式，未做任何改动" % d["device"]}
+        dm.dmPositionX, dm.dmPositionY = int(x), int(y)
+        dm.dmFields = (DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT |
+                       DM_DISPLAYFREQUENCY)
+        rc = _user32.ChangeDisplaySettingsExW(
+            d["device"], ctypes.byref(dm), None,
+            CDS_UPDATEREGISTRY | CDS_NORESET | extra, None)
+        if rc != DISP_CHANGE_SUCCESSFUL:
+            # Nothing has been applied yet (every stage carried CDS_NORESET),
+            # so bailing out here leaves the desktop exactly as it was.
+            return {"ok": False,
+                    "error": "预置 %s 失败（code %d），未应用任何改动" % (d["device"], rc)}
+        staged.append((d["device"], x, y))
+
+    rc = _user32.ChangeDisplaySettingsExW(None, None, None, 0, None)   # apply all
     if rc != DISP_CHANGE_SUCCESSFUL:
-        return {"ok": False, "error": "set primary failed (code %d)" % rc}
+        return {"ok": False, "error": "应用失败（code %d）" % rc}
     return {"ok": True, "out": "%s 已设为主显示器" % device}
 
 

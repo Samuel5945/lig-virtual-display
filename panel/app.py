@@ -513,22 +513,43 @@ def apply_dark_palette(app):
 
 
 def force_taskbar_button(widget):
-    """Make sure a frameless window keeps its taskbar button.
+    """Make the taskbar button behave for a frameless window.
 
-    Qt.Window | Qt.FramelessWindowHint usually keeps it, but Windows can drop
-    the window from the taskbar anyway unless WS_EX_APPWINDOW is set on the
-    native style. Cheap and idempotent.
+    Two separate things have to be forced, because Qt's
+    ``Qt.Window | Qt.FramelessWindowHint`` drops both:
+
+    * ``WS_EX_APPWINDOW`` - without it Windows can drop the window from the
+      taskbar entirely once the frame goes away.
+    * ``WS_MINIMIZEBOX`` (+ ``WS_SYSMENU``) - this is what makes **clicking the
+      taskbar button collapse the window**. The shell only minimises the
+      foreground window on a taskbar click when that window *can* be minimised,
+      and it decides by looking at these style bits; measured on this box the
+      frameless window had neither, so the click did nothing. They do not bring
+      back a title bar - that is ``WS_CAPTION``, which stays off.
+
+    ``WS_THICKFRAME`` is set on purpose and not a leftover: the old version of
+    this function wrote its ex-style into ``GWL_STYLE`` (``-16`` is the style,
+    ``-20`` the ex-style), and the value it OR-ed in - 0x00040000 - happens to
+    *be* WS_THICKFRAME. So every window this app ever shipped with had it, and
+    edge-drag resize plus the QSizeGrip quietly relied on that. Fixing the index
+    without adding the bit back would have taken resizing away.
     """
     try:
         import ctypes
-        GWL_EXSTYLE = -16
+        GWL_STYLE, GWL_EXSTYLE = -16, -20
+        WS_MINIMIZEBOX = 0x00020000
+        WS_SYSMENU = 0x00080000
+        WS_THICKFRAME = 0x00040000
         WS_EX_APPWINDOW = 0x00040000
         WS_EX_TOOLWINDOW = 0x00000080
         user32 = ctypes.windll.user32
         hwnd = int(widget.winId())
-        style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
         user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
-                              (style | WS_EX_APPWINDOW) & ~WS_EX_TOOLWINDOW)
+                              (ex | WS_EX_APPWINDOW) & ~WS_EX_TOOLWINDOW)
+        style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+        user32.SetWindowLongW(hwnd, GWL_STYLE, style | WS_MINIMIZEBOX
+                              | WS_SYSMENU | WS_THICKFRAME)
     except Exception:                                          # noqa: BLE001
         pass
 
@@ -1157,8 +1178,13 @@ class Main(QWidget):
         l6.addWidget(self.lbl_ss_cfg)
         self.ss_btns = seg_row(
             "串流画面",
-            [("system", "跟随系统", False), ("virtual", "虚拟屏", False)],
-            self._set_stream_target, l6)
+            [("system", "跟随系统", False), ("physical", "物理屏", False),
+             ("virtual", "虚拟屏", False)],
+            self._pick_stream_target, l6)
+        self.others_btns = seg_row(
+            "另一块屏",
+            [("keep", "保持扩展", False), ("blank", "串流时关掉", False)],
+            self._pick_others, l6)
         # the one line that settles arguments: which screen the phone is looking
         # at, by name -- "跟随系统" alone never said it
         self.lbl_ss_where = QLabel("—")
@@ -1319,11 +1345,43 @@ class Main(QWidget):
             return
         self._act(fn, *args)
 
-    def _set_stream_target(self, key):
-        """Point the stream at the virtual display, or hand it back to Windows.
-        Sunshine only re-reads its config on start, so this restarts the service.
+    def _stream_axes(self):
+        """Read the two stream axes back out of Sunshine's own config.
+
+        The conf is the only source of truth - nothing is remembered from the
+        last click, so an edit made in Sunshine's web UI shows up here on the
+        next poll just like a display change does.
         """
-        self._need_admin(backend.set_stream_target, key)
+        ss = backend.sunshine_status()
+        ids = ss.get("display_ids") or {}
+        st = ss.get("settings") or {}
+        out = (st.get("output_name") or "").strip()
+        dd = (st.get("dd_configuration_option") or "disabled").strip()
+        if out and out == ids.get("physical"):
+            target = "physical"
+        elif out and out == ids.get("virtual"):
+            target = "virtual"
+        else:
+            target = "system"          # unset, or an id that is no longer attached
+        return {"target": target, "keep": dd != "ensure_only_display",
+                "ids": ids, "settings": st}
+
+    def _pick_stream_target(self, key):
+        """Which screen the phone sees. Keeps the other axis as it stands."""
+        cur = self._stream_axes()
+        self._need_admin(backend.set_stream_target, key, cur["keep"])
+
+    def _pick_others(self, key):
+        """Whether the other screen goes dark during a stream.
+
+        Meaningless while the target is '跟随系统' (that option is what stops
+        Sunshine touching the topology), so the row is greyed out there; if a
+        click still arrives, pin the virtual screen - the option the row exists
+        for.
+        """
+        cur = self._stream_axes()
+        target = cur["target"] if cur["target"] != "system" else "virtual"
+        self._need_admin(backend.set_stream_target, target, key == "keep")
 
     def _set_topo(self, key):
         # "only the virtual display" switches the physical monitor off - if the
@@ -1558,17 +1616,19 @@ class Main(QWidget):
         self._apply_layout(s, vd, phys)
         self._apply_streaming(s, vd)
 
+    def _mark(self, btn, active):
+        """Flip a segment button's [active] style property in place."""
+        if btn.property("active") != active:
+            btn.setProperty("active", active)
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+
     def _apply_layout(self, s, vd, phys):
         """Reflect the live multi-monitor state on the layout card."""
         topo = s.get("topology")
         labels = s.get("topology_labels") or {}
         valid = s.get("topology_valid") or {}
-
-        def mark(btn, active):
-            if btn.property("active") != active:
-                btn.setProperty("active", active)
-                btn.style().unpolish(btn)
-                btn.style().polish(btn)
+        mark = self._mark
 
         for key, b in self.topo_btns.items():
             mark(b, key == topo)
@@ -1579,6 +1639,13 @@ class Main(QWidget):
             mark(b, (key == "virtual" and vd_primary) or
                     (key == "physical" and not vd_primary))
             b.setEnabled(bool(vd) and bool(phys))
+        # Switching the primary to the virtual screen is not cosmetic: the
+        # taskbar and the mouse follow it onto a screen nobody can see. Say so
+        # where the click happens rather than in a doc nobody opens.
+        self.prim_btns["virtual"].setToolTip(
+            "主显示器会跳到虚拟屏 —— 任务栏和鼠标都跟过去，而那块屏你看不见。\n"
+            "要回来：再点「物理屏」")
+        self.prim_btns["physical"].setToolTip("把主显示器切回物理屏（当前那块能看见的）")
 
         # position only means something while both screens are on. The side is
         # read back out of Windows' coordinates (vdd_core.virtual_side), never
@@ -1639,37 +1706,33 @@ class Main(QWidget):
             return
 
         st = ss.get("settings") or {}
-        out = st.get("output_name", "")
-        mode = st.get("dd_configuration_option", "disabled")
-        dev_id = ss.get("virtual_device_id")
-
-        on_virtual = bool(dev_id) and out == dev_id and \
-            mode in ("ensure_active", "ensure_only_display")
-        # ensure_only_display is what older builds wrote; it still points at the
-        # virtual screen, it just also blanks the physical one for the session.
-        following = not out and mode == "disabled"
+        out = (st.get("output_name") or "").strip()
+        mode = (st.get("dd_configuration_option") or "disabled").strip()
+        ids = ss.get("display_ids") or {}
+        axes = self._stream_axes()
+        target, keep = axes["target"], axes["keep"]
 
         for key, b in self.ss_btns.items():
-            active = (key == "virtual") == on_virtual
-            if b.property("active") != active:
-                b.setProperty("active", active)
-                b.style().unpolish(b)
-                b.style().polish(b)
-            b.setEnabled(True if key == "system" else dev_id is not None)
+            self._mark(b, key == target)
+            # an option is only pickable once Sunshine has reported that screen
+            b.setEnabled(True if key == "system" else bool(ids.get(key)))
+        for key, b in self.others_btns.items():
+            self._mark(b, (key == "keep") == keep)
+            b.setEnabled(target != "system")
 
-        if dev_id is None:
-            state = "已安装，但日志里还没有虚拟屏的 device_id（重启一次 Sunshine）"
-            col = C["warning"]
-        elif on_virtual:
-            tail = ("物理屏保持常亮" if mode == "ensure_active"
-                    else "串流时物理屏会黑")
-            state = "虚拟屏 ✓  手机只看到虚拟屏（%s）" % tail
+        if target == "system":
+            state = "跟随系统 ✓  手机看到主显示器那一块，系统里怎么设就怎么串"
             col = C["success"]
-        elif following:
-            state = "跟随系统 ✓  手机看到主屏，显示模式你在系统里怎么设就怎么串"
+        elif ids.get(target):
+            name = "物理屏" if target == "physical" else "虚拟屏"
+            state = "%s ✓  手机只看到%s（%s）" % (
+                name, name, "另一块照常可用" if keep else "串流时另一块会黑")
             col = C["success"]
         else:
             state = "串流目标未明确：output_name=%s / %s" % (out or "未设", mode)
+            col = C["warning"]
+        if not ids.get("virtual") and target != "virtual":
+            state += "　日志里还没有虚拟屏的 device_id（重启一次 Sunshine 才有）"
             col = C["warning"]
 
         self.lbl_ss_state.setText(state)
@@ -1820,6 +1883,53 @@ def selftest():
         checks.append(("串流去向说得出是哪块屏",
                        "手机看到 =" in (w.lbl_ss_where.text() or ""),
                        w.lbl_ss_where.text()))
+        checks.append(("主显示器两个按钮都可点且带跳转提示",
+                       all(b.isEnabled() for b in w.prim_btns.values()) and
+                       "看不见" in (w.prim_btns["virtual"].toolTip() or ""),
+                       [b.isEnabled() for b in w.prim_btns.values()]))
+        # 串流两轴：抓哪块屏 × 另一块屏黑不黑，全部从 conf 回读
+        axes = w._stream_axes()
+        lit_t = [k for k, b in w.ss_btns.items() if bool(b.property("active"))]
+        lit_o = [k for k, b in w.others_btns.items() if bool(b.property("active"))]
+        print("  串流两轴          : target=%s keep=%s 亮=%s / %s"
+              % (axes["target"], axes["keep"], lit_t, lit_o))
+        checks.append(("串流画面三态齐全",
+                       set(w.ss_btns) == {"system", "physical", "virtual"},
+                       sorted(w.ss_btns)))
+        checks.append(("另一块屏两态齐全",
+                       set(w.others_btns) == {"keep", "blank"},
+                       sorted(w.others_btns)))
+        checks.append(("串流画面恰好亮一个且等于 conf 回读",
+                       lit_t == [axes["target"]], (lit_t, axes["target"])))
+        checks.append(("另一块屏恰好亮一个且等于 conf 回读",
+                       lit_o == [("keep" if axes["keep"] else "blank")],
+                       (lit_o, axes["keep"])))
+        checks.append(("跟随系统时「另一块屏」置灰",
+                       (axes["target"] != "system") or
+                       all(not b.isEnabled() for b in w.others_btns.values()),
+                       (axes["target"],
+                        [b.isEnabled() for b in w.others_btns.values()])))
+        # 任务栏图标点一下要能收回：shell 只看样式位，所以直接量样式位
+        w.show()
+        for _ in range(8):
+            app.processEvents()
+            time.sleep(0.05)
+        try:
+            import ctypes
+            h = int(w.winId())
+            st = ctypes.windll.user32.GetWindowLongW(h, -16)
+            ex = ctypes.windll.user32.GetWindowLongW(h, -20)
+            checks.append(("样式带 WS_MINIMIZEBOX（任务栏点击可收回）",
+                           bool(st & 0x00020000), hex(st & 0xFFFFFFFF)))
+            checks.append(("样式带 WS_SYSMENU", bool(st & 0x00080000), hex(st)))
+            checks.append(("没带 WS_CAPTION（不会长出系统标题栏）",
+                           not (st & 0x00C00000), hex(st & 0xFFFFFFFF)))
+            checks.append(("仍带 WS_THICKFRAME（边缘拖拽缩放不丢）",
+                           bool(st & 0x00040000), hex(st & 0xFFFFFFFF)))
+            checks.append(("扩展样式带 WS_EX_APPWINDOW（任务栏有按钮）",
+                           bool(ex & 0x00040000), hex(ex & 0xFFFFFFFF)))
+        except Exception as exc:                               # noqa: BLE001
+            checks.append(("读窗口样式", False, str(exc)))
         # clicking a side must resolve through the same geometry the buttons use
         lay = w.map._layout()
         if lay:
