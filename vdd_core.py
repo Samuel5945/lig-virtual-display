@@ -348,12 +348,20 @@ def device_installed():
 
 
 def list_displays():
-    """Every attached display: (device_name, adapter, w, h, hz, is_virtual).
+    r"""Every attached display: (device_name, adapter, w, h, hz, is_virtual).
 
     Reads real pixel modes via EnumDisplaySettings, so a HiDPI physical
     monitor reports 3840x2160 and not the DPI-scaled 1920x1080.
+
+    Each entry also carries `number`: the number Windows' own display settings
+    paints on that screen with 「标识」. It is the display source's enumeration
+    position, renumbered from 1 - NOT the suffix of \\.\DISPLAYn. Measured on
+    this box: the virtual screen is \\.\DISPLAY6 yet Windows labels it 3, and
+    the panel has to say the same number or the two screens cannot be told
+    apart when the user is standing at the desk.
     """
     out = []
+    num = 0
     i = 0
     while True:
         ad = DISPLAY_DEVICEW()
@@ -376,6 +384,11 @@ def list_displays():
                                             ctypes.byref(dm)):
             continue
         attached = bool(ad.StateFlags & 0x1)
+        # Windows labels the screens that are on, 1..N in enumeration order;
+        # sources that are off still occupy an enumeration slot but get no
+        # number, which is why DISPLAY6 here is labelled 3.
+        if attached:
+            num += 1
         out.append({
             "device": name,
             "adapter": ad.DeviceString or "",
@@ -388,6 +401,7 @@ def list_displays():
             "attached": attached,
             "primary": bool(ad.StateFlags & 0x4),
             "virtual": DRIVER_MATCH in (ad.DeviceString or ""),
+            "number": num if attached else 0,
         })
     return out
 
@@ -430,7 +444,29 @@ def set_mode(device, width, height, hz):
         return {"ok": False,
                 "error": "%dx%d@%d is not offered by the driver"
                          % (width, height, hz)}
+    return _apply_mode(device, width, height, hz)
 
+
+def set_display_mode(device, width, height, hz):
+    """Switch any attached screen to one of the modes it reports.
+
+    The layout card's per-screen picker uses this so the physical screen can be
+    set from the panel too, exactly like Windows' own resolution list. Safety
+    comes from the mode having to exist in EnumDisplaySettings' own list, and
+    from Windows' own display-change protection.
+    """
+    target = next((d for d in list_displays()
+                   if d["device"] == device and d["attached"]), None)
+    if target is None:
+        return {"ok": False, "error": "no such display: %s" % device}
+    if (width, height, hz) not in available_modes(device):
+        return {"ok": False,
+                "error": "%dx%d@%d is not offered by %s"
+                         % (width, height, hz, device)}
+    return _apply_mode(device, width, height, hz)
+
+
+def _apply_mode(device, width, height, hz):
     dm = DEVMODEW()
     dm.dmSize = ctypes.sizeof(DEVMODEW)
     _user32.EnumDisplaySettingsW(device, ENUM_CURRENT_SETTINGS, ctypes.byref(dm))
@@ -592,6 +628,57 @@ def describe_display(d):
         d.get("height", 0), "·主屏" if d.get("primary") else "")
 
 
+def _sunshine_entry_screen(dv, attached):
+    """Windows screen for one Sunshine enumeration entry, or None.
+
+    display_name is the normal join, but the VDD entry comes back with an
+    empty name when Sunshine started before the virtual screen was up - its
+    EDID still says MTT, so fall back to the attached virtual screen. Without
+    this fallback the panel called a perfectly pin-able virtual screen
+    "not enumerated" and its config "stale", which is exactly how the virtual
+    target ended up greyed out while its device_id was right there.
+    """
+    edid = dv.get("edid") or {}
+    virtual = (edid.get("manufacturer_id") == "MTT"
+               or "MTT" in (dv.get("friendly_name") or ""))
+    name = dv.get("display_name")
+    if name:
+        d = next((x for x in attached if x["device"] == name), None)
+        if d is not None:
+            return d
+    if virtual:
+        return next((x for x in attached if x["virtual"]), None)
+    return None
+
+
+def sunshine_targets(displays=None):
+    """Screens Sunshine actually enumerated, joined to Windows, by number.
+
+    Each item carries key = the device_id output_name would hold, plus number,
+    kind, friendly name and GDI name. Sunshine can only capture a screen it
+    listed at startup, so the panel offers exactly these instead of guessing
+    from the physical/virtual split.
+    """
+    if displays is None:
+        displays = list_displays()
+    attached = [d for d in displays if d.get("attached")]
+    targets = []
+    for dv in sunshine_displays():
+        d = _sunshine_entry_screen(dv, attached)
+        if d is None:
+            continue
+        targets.append({
+            "key": dv.get("device_id"),
+            "number": d.get("number") or 0,
+            "kind": "virtual" if d["virtual"] else "physical",
+            "name": dv.get("friendly_name") or "",
+            "gdi": d["device"],
+            "primary": bool(d.get("primary")),
+        })
+    targets.sort(key=lambda t: (t["number"] or 99, t["gdi"]))
+    return targets
+
+
 def capture_target(settings=None, displays=None):
     """Which screen the phone actually sees.
 
@@ -611,10 +698,11 @@ def capture_target(settings=None, displays=None):
     out = (st.get("output_name") or "").strip()
     named = None
     if out:
-        smap = {dv.get("device_id"): dv.get("display_name")
-                for dv in sunshine_displays()}
-        dev = smap.get(out)
-        named = next((d for d in attached if d["device"] == dev), None)
+        for dv in sunshine_displays():
+            if dv.get("device_id") != out:
+                continue
+            named = _sunshine_entry_screen(dv, attached)
+            break
         if named is None:
             return {"kind": "stale", "display": None,
                     "label": "output_name = %s" % out,
@@ -625,8 +713,8 @@ def capture_target(settings=None, displays=None):
     mode = (st.get("dd_configuration_option") or "disabled").strip()
     if named:
         blank = mode == "ensure_only_display"
-        note = ("钉住这块屏，串流期间另一块屏会黑" if blank
-                else "钉住这块屏，另一块屏照常可用，只是手机看不到它")
+        note = ("钉住这块屏，串流期间其他屏会黑（断开后恢复）" if blank
+                else "钉住这块屏，其他屏照常可用，只是手机看不到它们")
     else:
         blank = False
         note = "「跟随系统」抓的是主显示器这一块，不是整个桌面"
@@ -649,17 +737,17 @@ def sunshine_display_ids(displays=None):
     """{'physical': id, 'virtual': id} - Sunshine's own device ids, either may be None.
 
     The ids only exist in Sunshine's startup enumeration (its log); the Windows
-    side is what says which of those screens is attached and which one is the
-    VDD. display_name is the only join between the two, so an id is reported
-    only when the screen it names is actually attached right now.
+    side says which of those screens is attached and which one is the VDD.
+    display_name is the normal join; the VDD entry falls back to its EDID when
+    Sunshine could not read a GDI name for it (see _sunshine_entry_screen).
     """
     if displays is None:
         displays = list_displays()
-    attached = {d["device"]: d for d in displays if d.get("attached")}
+    attached = [d for d in displays if d.get("attached")]
     ids = {"physical": None, "virtual": None}
     for dv in sunshine_displays():
-        d = attached.get(dv.get("display_name"))
-        if not d:
+        d = _sunshine_entry_screen(dv, attached)
+        if d is None:
             continue
         kind = "virtual" if d["virtual"] else "physical"
         if ids[kind] is None:
@@ -869,18 +957,20 @@ def current_topology():
 
 
 def set_position(device, x, y):
-    """Move a display to (x, y) in the virtual desktop.
+    """Move an attached display to (x, y) in the virtual desktop.
 
-    Only virtual displays are accepted - a typo must never shove the physical
-    monitor somewhere off-screen.
+    The primary display stays pinned at (0,0) by Windows' rule, so it is
+    refused. Everything else - a physical second screen or a virtual one -
+    can be moved. Windows also refuses overlap (measured: it returns success
+    but clamps the overlapping axis), which is why the panel's drag preview
+    pushes boxes apart before writing.
     """
-    target = None
-    for d in list_displays():
-        if d["device"] == device and d["virtual"]:
-            target = d
-            break
+    target = next((d for d in list_displays()
+                   if d["device"] == device and d["attached"]), None)
     if target is None:
-        return {"ok": False, "error": "%s is not a virtual display" % device}
+        return {"ok": False, "error": "no such display: %s" % device}
+    if target["primary"]:
+        return {"ok": False, "error": "主显示器固定在 (0,0)，不能直接移动"}
 
     dm = DEVMODEW()
     dm.dmSize = ctypes.sizeof(DEVMODEW)
@@ -888,6 +978,10 @@ def set_position(device, x, y):
     dm.dmPositionX = int(x)
     dm.dmPositionY = int(y)
     dm.dmFields = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY
+    rc = _user32.ChangeDisplaySettingsExW(
+        device, ctypes.byref(dm), None, CDS_TEST, None)
+    if rc != DISP_CHANGE_SUCCESSFUL:
+        return {"ok": False, "error": "move rejected (code %d)" % rc}
     rc = _user32.ChangeDisplaySettingsExW(
         device, ctypes.byref(dm), None, CDS_UPDATEREGISTRY, None)
     if rc != DISP_CHANGE_SUCCESSFUL:
@@ -1028,21 +1122,14 @@ def make_primary(device):
     return {"ok": True, "out": "%s 已设为主显示器" % device}
 
 
-# ---------------- per-monitor scaling (read-only) ----------------
+# ---------------- per-monitor scaling (read + write) ----------------
 
 class _POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
 
 def get_scaling(device):
-    """Effective DPI scale of a display, as a percentage (100, 125, 150...).
-
-    Read-only on purpose. Windows keeps per-monitor scaling in an EDID-hashed
-    registry key that a third-party app cannot derive reliably, and there is no
-    supported Win32 call to change it - writing the wrong key would rescale the
-    physical monitor. So the panel shows the value and hands changes off to
-    Windows' own display settings.
-    """
+    """Effective DPI scale of a display, as a percentage (100, 125, 150...)."""
     target = None
     for d in list_displays():
         if d["device"] == device and d["attached"]:
@@ -1067,6 +1154,176 @@ def get_scaling(device):
         return int(round(dx.value * 100.0 / 96.0))
     except Exception:                                          # noqa: BLE001
         return None
+
+
+# DisplayConfig device-info packet types. The setter is defined in the SDK
+# headers but omitted from the public enum docs; measured on Windows 10 19045
+# it returns 0 and the new scale is live immediately (GetDpiForMonitor sees it
+# on the next call). The registry route (PerMonitorSettings\DpiValue) did not
+# take effect without a sign-out; this one does.
+_DC_GET_SOURCE_NAME = 1
+_DC_SET_DPI_SCALE = -4
+_QDC_ONLY_ACTIVE_PATHS = 2
+# Windows' scaling ladder; scaleRel counts steps on this ladder from the
+# screen's recommended entry.
+SCALE_PCTS = (100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500)
+
+
+class _LUID(ctypes.Structure):
+    _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+
+
+class _DCPathSource(ctypes.Structure):
+    _fields_ = [("adapterId", _LUID), ("id", wintypes.UINT),
+                ("modeInfoIdx", wintypes.UINT), ("statusFlags", wintypes.UINT)]
+
+
+class _DCRational(ctypes.Structure):
+    _fields_ = [("Numerator", wintypes.UINT), ("Denominator", wintypes.UINT)]
+
+
+class _DCPathTarget(ctypes.Structure):
+    _fields_ = [("adapterId", _LUID), ("id", wintypes.UINT),
+                ("modeInfoIdx", wintypes.UINT),
+                ("outputTechnology", ctypes.c_int),
+                ("rotation", ctypes.c_int),
+                ("scaling", ctypes.c_int),
+                ("refreshRate", _DCRational),
+                ("scanLineOrdering", ctypes.c_int),
+                ("targetAvailable", wintypes.BOOL),
+                ("statusFlags", wintypes.UINT)]
+
+
+class _DCPathInfo(ctypes.Structure):
+    _fields_ = [("sourceInfo", _DCPathSource),
+                ("targetInfo", _DCPathTarget),
+                ("flags", wintypes.UINT)]
+
+
+class _DCModeInfo(ctypes.Structure):
+    # 16 bytes of header + the 48-byte mode union (x64)
+    _fields_ = [("infoType", ctypes.c_int), ("id", wintypes.UINT),
+                ("adapterId", _LUID), ("blob", ctypes.c_byte * 48)]
+
+
+class _DCDeviceInfoHeader(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_int), ("size", wintypes.UINT),
+                ("adapterId", _LUID), ("id", wintypes.UINT)]
+
+
+class _DCSourceName(ctypes.Structure):
+    _fields_ = [("header", _DCDeviceInfoHeader),
+                ("viewGdiDeviceName", wintypes.WCHAR * 32)]
+
+
+class _DCScaleSet(ctypes.Structure):
+    _fields_ = [("header", _DCDeviceInfoHeader), ("scaleRel", ctypes.c_int32)]
+
+
+def _display_source(device):
+    r"""(adapter LUID, source id) for a GDI display like \\.\DISPLAY6."""
+    np = wintypes.UINT(32)
+    nm = wintypes.UINT(64)
+    if _user32.GetDisplayConfigBufferSizes(
+            _QDC_ONLY_ACTIVE_PATHS, ctypes.byref(np), ctypes.byref(nm)) != 0:
+        return None
+    paths = (_DCPathInfo * max(1, np.value))()
+    modes = (_DCModeInfo * max(1, nm.value))()
+    if _user32.QueryDisplayConfig(
+            _QDC_ONLY_ACTIVE_PATHS, ctypes.byref(np), paths,
+            ctypes.byref(nm), modes, None) != 0:
+        return None
+    for i in range(np.value):
+        src = paths[i].sourceInfo
+        req = _DCSourceName()
+        req.header.type = _DC_GET_SOURCE_NAME
+        req.header.size = ctypes.sizeof(req)
+        req.header.adapterId = src.adapterId
+        req.header.id = src.id
+        if (_user32.DisplayConfigGetDeviceInfo(ctypes.byref(req)) == 0
+                and req.viewGdiDeviceName == device):
+            return src.adapterId, src.id
+    return None
+
+
+def _set_scale_rel(adapter, sid, rel):
+    pkt = _DCScaleSet()
+    pkt.header.type = _DC_SET_DPI_SCALE
+    pkt.header.size = ctypes.sizeof(pkt)
+    pkt.header.adapterId = adapter
+    pkt.header.id = sid
+    pkt.scaleRel = int(rel)
+    rc = _user32.DisplayConfigSetDeviceInfo(ctypes.byref(pkt))
+    return rc == 0, rc
+
+
+def _scale_index(percent):
+    return min(range(len(SCALE_PCTS)),
+               key=lambda i: abs(SCALE_PCTS[i] - int(percent)))
+
+
+def _wait_scaling(device, before, timeout=0.9):
+    """Read the scale until it leaves `before`, or the timeout runs out.
+
+    The display service updates GetDpiForMonitor asynchronously; a fixed
+    sleep of 0.18 s was enough for a plain scaling change but not right after
+    a resolution switch, which made the calibration below read the old value
+    and pick a relative step that landed one rung short (measured: asked for
+    225%, got 175%).
+    """
+    import time
+    t0 = time.time()
+    value = get_scaling(device)
+    while time.time() - t0 < timeout:
+        value = get_scaling(device)
+        if value is not None and value != before:
+            return value
+        time.sleep(0.04)
+    return value if value is not None else before
+
+
+def set_scaling(device, percent):
+    """Set one screen's scaling and report the value Windows actually took.
+
+    scaleRel counts steps of 25% from that screen's *recommended* scale, so 0
+    is not 100% (measured: this virtual screen's recommended scale is 125%,
+    and it tops out at 225%). The first set therefore asks for 0 and reads the
+    base back; a screen that clamps reports the clamped value rather than
+    pretending the request landed.
+    """
+    target = next((d for d in list_displays()
+                   if d["device"] == device and d["attached"]), None)
+    if target is None:
+        return {"ok": False, "error": "no such display: %s" % device}
+    src = _display_source(device)
+    if src is None:
+        return {"ok": False, "error": "找不到显示源：%s" % device}
+    adapter, sid = src
+    now = get_scaling(device)
+    if now is None:
+        return {"ok": False, "error": "读不到当前缩放：%s" % device}
+    want = int(round(float(percent)))
+    if now == want:
+        return {"ok": True, "out": "%s 缩放已经是 %d%%" % (device, want)}
+
+    ok, rc = _set_scale_rel(adapter, sid, 0)          # calibrate the base
+    if not ok:
+        return {"ok": False, "error": "缩放接口不可用（code %d）" % rc}
+    base = _wait_scaling(device, now)
+    if want == base:
+        return {"ok": True, "out": "%s 缩放 -> %d%%" % (device, base)}
+    rel = _scale_index(want) - _scale_index(base)
+    ok, rc = _set_scale_rel(adapter, sid, rel)
+    if not ok:
+        _set_scale_rel(adapter, sid, _scale_index(now) - _scale_index(base))
+        return {"ok": False, "error": "设置失败（code %d）" % rc}
+    got = _wait_scaling(device, base)
+    if got is None:
+        return {"ok": False, "error": "设置后读不回缩放：%s" % device}
+    if got != want:
+        return {"ok": True,
+                "out": "%s 缩放 -> %d%%（该屏只到 %d%%）" % (device, got, got)}
+    return {"ok": True, "out": "%s 缩放 -> %d%%" % (device, got)}
 
 
 _last_device_installed = None

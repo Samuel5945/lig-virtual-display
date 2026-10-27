@@ -71,6 +71,48 @@ def modes():
         return []
 
 
+def display_modes(device):
+    """Every mode one screen reports, physical or virtual."""
+    if core is None:
+        return []
+    try:
+        return core.available_modes(str(device))
+    except Exception:                                          # noqa: BLE001
+        return []
+
+
+def set_display_mode(device, width, height, hz):
+    """Set the resolution of the screen selected in the layout card."""
+    if core is None:
+        return _err(CORE_ERROR)
+    try:
+        r = core.set_display_mode(str(device), int(width), int(height), int(hz))
+        return {"ok": r.get("ok", False), "out": r.get("out", ""),
+                "error": r.get("error", "")}
+    except Exception as exc:                                   # noqa: BLE001
+        return _err(str(exc))
+
+
+def set_display_scaling(device, percent):
+    """Set the scaling of the screen selected in the layout card."""
+    if core is None:
+        return _err(CORE_ERROR)
+    try:
+        r = core.set_scaling(str(device), int(percent))
+        return {"ok": r.get("ok", False), "out": r.get("out", ""),
+                "error": r.get("error", "")}
+    except Exception as exc:                                   # noqa: BLE001
+        return _err(str(exc))
+
+
+def scale_options():
+    """Windows' scaling ladder, for the layout card's dropdown."""
+    if core is None:
+        return [100, 125, 150, 175, 200, 225, 250, 300]
+    return list(getattr(core, "SCALE_PCTS",
+                        (100, 125, 150, 175, 200, 225, 250, 300)))
+
+
 # --------------------------------------------------------------------------- #
 # actions - all return {"ok": bool, "out": str, "error": str}
 # --------------------------------------------------------------------------- #
@@ -191,8 +233,25 @@ def place_beside(side):
             "error": r.get("error", "")}
 
 
+def move_display(device, x, y):
+    """Put any non-primary display at an exact spot (dragged in the schematic).
+
+    core.set_position refuses the pinned primary; physical second screens and
+    virtual screens both go through the same call.
+    """
+    if core is None:
+        return _err(CORE_ERROR)
+    try:
+        r = core.set_position(str(device), int(round(x)), int(round(y)))
+        return {"ok": r.get("ok", False), "out": r.get("out", ""),
+                "error": r.get("error", "")}
+    except Exception as exc:                                   # noqa: BLE001
+        return _err(str(exc))
+
+
 def make_primary(which):
-    """which: 'physical' or 'virtual'."""
+    """which: 'physical' (the first physical screen, i.e. the numbered one the
+    panel names) or 'virtual' (the first virtual screen)."""
     if core is None:
         return _err(CORE_ERROR)
     target = None
@@ -201,8 +260,10 @@ def make_primary(which):
             continue
         if which == "virtual" and d["virtual"]:
             target = d
-        elif which == "physical" and not d["virtual"]:
+            break
+        if which == "physical" and not d["virtual"]:
             target = d
+            break
     if target is None:
         return _err("找不到%s显示器" % ("虚拟" if which == "virtual" else "物理"))
     r = core.make_primary(target["device"])
@@ -253,6 +314,7 @@ def sunshine_status():
                      if core.sunshine_conf_path() else {}),
         "virtual_device_id": core.sunshine_virtual_device_id(),
         "display_ids": core.sunshine_display_ids(),
+        "targets": core.sunshine_targets(),
     }
 
 
@@ -316,33 +378,37 @@ def configure_sunshine_follow():
 
 
 def set_stream_target(target, keep_others=True):
-    """Choose which screen the phone sees, and what the other one does.
+    """Choose which screen the phone sees, and what the others do.
 
-    ``target``: 'system' | 'physical' | 'virtual'.
-    ``keep_others``: True leaves the rest of the desktop alone; False makes
-    Sunshine keep only the pinned screen active for the duration of the session
-    (and revert when the last client leaves). 'system' ignores it - handing the
-    choice back to Windows means not managing the topology at all.
+    ``target``: 'system', a Sunshine device_id from sunshine_targets(), or the
+    legacy 'physical'/'virtual' aliases. ``keep_others``: True leaves the rest
+    of the desktop alone; False makes Sunshine keep only the pinned screen
+    active for the duration of the session (and revert when the last client
+    leaves). 'system' ignores it - handing the choice back to Windows means
+    not managing the topology at all.
 
     Sunshine only re-reads its config on start, so every path restarts it.
     """
     if core is None:
         return _err(CORE_ERROR)
     try:
-        ids = core.sunshine_display_ids()
+        if target == "system":
+            dev = None
+        elif target in ("physical", "virtual"):
+            dev = core.sunshine_display_ids().get(target)
+            if not dev:
+                return _err("Sunshine 日志里还没有%s的 device_id —— 先重启一次 Sunshine"
+                            % ("物理屏" if target == "physical" else "虚拟屏"))
+        else:
+            valid = {t["key"] for t in core.sunshine_targets()}
+            if target not in valid:
+                return _err("Sunshine 没有枚举到这块屏：%s" % target)
+            dev = target
+        dd = (core.STREAM_KEEP_OTHERS
+              if target == "system" or keep_others
+              else core.STREAM_BLANK_OTHERS)
     except Exception as exc:                                       # noqa: BLE001
         return _err(str(exc))
-    if target == "system":
-        dev, dd = None, core.STREAM_KEEP_OTHERS
-    elif target in ("physical", "virtual"):
-        dev = ids.get(target)
-        if not dev:
-            return _err("Sunshine 日志里还没有%s的 device_id —— 先重启一次 Sunshine"
-                        % ("物理屏" if target == "physical" else "虚拟屏"))
-        dd = (core.STREAM_KEEP_OTHERS if keep_others
-              else core.STREAM_BLANK_OTHERS)
-    else:
-        return _err("不认识的串流目标：%s" % target)
     r = core.set_stream_output(dev, dd)
     if not r.get("ok"):
         return r

@@ -17,8 +17,9 @@ from PySide6.QtGui import QColor, QPainter, QBrush, QPen, QFont, QFontMetrics
 from PySide6.QtCore import QRectF, QPointF
 from PySide6.QtWidgets import QAbstractButton
 from PySide6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QComboBox, QSpinBox, QScrollArea, QSizeGrip, QMessageBox,
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QPushButton, QFrame, QComboBox, QSpinBox, QScrollArea, QSizeGrip,
+    QMessageBox,
 )
 
 import backend
@@ -123,12 +124,20 @@ QPushButton {
 }
 QPushButton:hover   { background-color: #262c38; border-color: #333a47; }
 QPushButton:pressed { background-color: #1a1f28; }
+QPushButton:focus   { border-color: %(accent)s; }
 QPushButton:disabled{ color: %(faint)s; border-color: #22262f; background-color: #191d24; }
 
 QPushButton#Primary { background-color: %(accent)s; border: 1px solid %(accent)s;
                       color: #06231f; font-weight: 600; }
 QPushButton#Primary:hover   { background-color: #65ded3; border-color: #65ded3; }
 QPushButton#Primary:disabled{ background-color: #23343a; border-color: #23343a; color: #4a5a60; }
+
+/* the accent-filled twin of #Compact, for a row's primary action */
+QPushButton#PrimaryCompact { background-color: %(accent)s; border: 1px solid %(accent)s;
+                             color: #06231f; font-weight: 600; padding: 6px 12px;
+                             min-width: 0; font-size: 11.5px; }
+QPushButton#PrimaryCompact:hover { background-color: #65ded3; border-color: #65ded3; }
+QPushButton#PrimaryCompact:disabled { background-color: #23343a; border-color: #23343a; color: #4a5a60; }
 
 QPushButton#Danger  { background-color: #2a1c1c; border: 1px solid %(danger_dim)s; color: %(danger)s; }
 QPushButton#Danger:hover { background-color: #3a2222; border-color: #a04a4a; }
@@ -153,9 +162,12 @@ QPushButton#MiniDanger { padding: 3px 9px; min-width: 0; font-size: 11px; border
                          background-color: #2a1c1c; border: 1px solid %(danger_dim)s; color: %(danger)s; }
 QPushButton#MiniDanger:hover { background-color: #3a2222; }
 
+/* a button that sits inside a settings row: as wide as its word, not 64px */
+QPushButton#Compact { padding: 6px 12px; min-width: 0; font-size: 11.5px; }
+
 QComboBox {
     background-color: #1f242e; border: 1px solid %(border)s; border-radius: 8px;
-    color: %(text)s; padding: 6px 10px; min-width: 150px; font-size: 12px;
+    color: %(text)s; padding: 6px 10px; min-width: 0; font-size: 12px;
 }
 QComboBox:hover { border-color: #333a47; }
 /* an explicit :focus rule is required: without it the style draws a focus
@@ -172,6 +184,11 @@ QComboBox::drop-down {
     width: 26px;
 }
 QComboBox::down-arrow { image: none; }
+/* width is per-use, not global: a stretching combo box was both ugly and why
+   the 应用 button fell off the right edge at the default 620px window */
+QComboBox#Mode  { min-width: 168px; max-width: 170px; }
+QComboBox#Res   { min-width: 130px; max-width: 130px; }
+QComboBox#Scale { min-width: 56px;  max-width: 56px; }
 QComboBox QAbstractItemView {
     background-color: #1f242e; border: 1px solid %(border)s; border-radius: 8px;
     color: %(text)s; selection-background-color: %(accent_dim)s; padding: 4px;
@@ -758,7 +775,7 @@ class ActionThread(QThread):
 # --------------------------------------------------------------------------- #
 
 RES_TAGS = {(3840, 2160): "4K", (2560, 1440): "2.5K", (1920, 1080): "FHD",
-            (2560, 1600): "2.5K宽", (1080, 2400): "竖屏"}
+            (2560, 1600): "2.5K宽", (2160, 1440): "3:2", (1080, 2400): "竖屏"}
 
 
 def res_tag(w, h):
@@ -776,16 +793,31 @@ class DisplayMap(QWidget):
     so draw the fact: position and size of every rect come straight from
     EnumDisplaySettings. A click on one side of the reference screen moves the
     virtual display there through the same handler the buttons use.
+
+    The big number in each box is the number Windows' own 「标识」 paints on
+    that screen (vdd_core.list_displays numbers them the same way), so the two
+    pictures can be read side by side. Virtual boxes can also be dragged: the
+    drag preview snaps to the neighbours' edges and centres, and on release the
+    new position is written back with ChangeDisplaySettingsEx. Physical boxes
+    are read-only - their real position is where the desk is, and a stray drag
+    must not shove the monitor the user is looking at.
     """
 
     sideClicked = Signal(str)
-    # 150, not 112: a side-by-side 4K + 2.5K arrangement is 2.96:1, so the
-    # widget is height-limited and every extra pixel of height is box size. At
-    # 112 the boxes came out small enough that the labels fell back to their
-    # abbreviated form even though the card had room to spare.
-    MIN_H, PAD, GUT = 150, 12, 18
+    moveRequested = Signal(str, int, int)        # device, x, y in desktop px
+    selectedChanged = Signal(str)                # which screen the card edits
+    # 190: three stacked screens spend the widget's height on 5040 desktop px.
+    # At 170 the virtual and third boxes fell below the height where the caption
+    # line fits (number only); 190 keeps the caption and still leaves the
+    # resolution/scaling row on the first screen at the default window height.
+    MIN_H, PAD, GUT = 190, 12, 18
+    SNAP_PX = 8.0
     SIDE_CN = {"left": "在左侧", "right": "在右侧",
                "above": "在上方", "below": "在下方"}
+    # tooltip phrasing: "放到%s" reads right with a bare direction, while
+    # SIDE_CN's "在…" form belongs to the legend's 偏向… sentence
+    SIDE_GO = {"left": "左侧", "right": "右侧",
+               "above": "上方", "below": "下方"}
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -794,14 +826,21 @@ class DisplayMap(QWidget):
         self._interactive = False
         self._hover = None
         self._sig = None
+        self._selected = None
+        self._press_device = None
+        self._drag = None           # {"device", "press", "rect", "moved"}
+        self._drag_rect = None
         self.setMinimumHeight(self.MIN_H)
         self.setMouseTracking(True)
 
-    def set_state(self, displays, ref, virtual, side, exact, interactive):
+    def set_state(self, displays, ref, virtual, side, exact, interactive,
+                  selected=None):
         """Feed it the live readings. Repaints only when something moved."""
-        sig = (tuple(sorted((d["device"], d["x"], d["y"], d["width"], d["height"],
+        sig = (tuple(sorted((d["device"], d.get("number"), d["x"], d["y"],
+                             d["width"], d["height"],
                              bool(d["virtual"]), bool(d["primary"]))
-                            for d in displays)), side, exact, interactive)
+                            for d in displays)), side, exact, interactive,
+               selected)
         if sig == self._sig:
             return
         self._sig = sig
@@ -811,9 +850,21 @@ class DisplayMap(QWidget):
         self._side = side
         self._exact = exact
         self._interactive = interactive
+        self._selected = selected
         if not interactive:
             self._hover = None
+        # A poll that saw the geometry change while a drag was in flight means
+        # Windows moved a screen under our feet; the drag preview no longer
+        # refers to anything real, so drop it rather than write a stale spot.
+        self._drag = None
+        self._drag_rect = None
         self.update()
+
+    def set_selected(self, device):
+        """Selection moved without any geometry moving."""
+        if device != self._selected:
+            self._selected = device
+            self.update()
 
     # ------------------------------------------------------------- geometry
     def _layout(self):
@@ -856,31 +907,178 @@ class DisplayMap(QWidget):
         cand = [(g, s) for s, g in gaps.items() if g > 0]
         return min(cand)[1] if cand else None
 
+    def _movable_at(self, x, y):
+        """Any attached, non-primary box under a point - virtual or physical.
+
+        Windows pins the primary at (0,0); every other screen can be dragged,
+        which is what the layout card's picture promises.
+        """
+        lay = self._layout()
+        if not lay:
+            return None
+        for d in self._displays:
+            if not d.get("attached") or d.get("primary"):
+                continue
+            r = lay[2].get(d["device"])
+            if r is not None and r.contains(float(x), float(y)):
+                return d["device"]
+        return None
+
+    def _display_at(self, x, y):
+        """Device of any attached box under a widget point."""
+        lay = self._layout()
+        if not lay:
+            return None
+        for d in self._displays:
+            if not d.get("attached"):
+                continue
+            r = lay[2].get(d["device"])
+            if r is not None and r.contains(float(x), float(y)):
+                return d["device"]
+        return None
+
+    def _clamp_rect(self, rect):
+        """Keep the dragged box inside the picture.
+
+        Windows accepts a screen at any coordinate; the widget is a finite
+        box, so a box dragged past the edge would simply vanish.
+        """
+        x = min(max(rect.left(), self.PAD),
+                max(self.PAD, self.width() - self.PAD - rect.width()))
+        y = min(max(rect.top(), self.PAD),
+                max(self.PAD, self.height() - self.PAD - rect.height()))
+        out = QRectF(rect)
+        out.moveLeft(x)
+        out.moveTop(y)
+        return out
+
+    def _snap_rect(self, rect, device):
+        """Pull a dragged box onto a neighbour's edges or centre lines.
+
+        Candidates include true alignment (left/right/centre) and edge-to-edge
+        abutment, which is what Windows' own settings do when two boxes touch.
+        The threshold is in widget pixels, so it feels the same however far the
+        desktop is zoomed down.
+        """
+        lay = self._layout()
+        if not lay:
+            return rect
+        others = [r for dev, r in lay[2].items() if dev != device]
+        if not others:
+            return rect
+        xs, ys = [rect.left()], [rect.top()]
+        for o in others:
+            for c in (o.left(), o.right() - rect.width(),
+                      o.center().x() - rect.width() / 2.0,
+                      o.right(), o.left() - rect.width()):
+                if abs(c - rect.left()) <= self.SNAP_PX:
+                    xs.append(c)
+            for c in (o.top(), o.bottom() - rect.height(),
+                      o.center().y() - rect.height() / 2.0,
+                      o.bottom(), o.top() - rect.height()):
+                if abs(c - rect.top()) <= self.SNAP_PX:
+                    ys.append(c)
+        out = QRectF(rect)
+        out.moveLeft(min(xs, key=lambda c: abs(c - rect.left())))
+        out.moveTop(min(ys, key=lambda c: abs(c - rect.top())))
+        return self._clamp_rect(out)
+
+    def _avoid_overlap(self, rect, device):
+        """Windows will not let two extended sources overlap.
+
+        Measured on this box: asking ChangeDisplaySettingsEx for a virtual
+        screen that overlaps the physical one returns success but silently
+        clamps the axis (y stayed at -1440 when -1360 was requested). A drag
+        preview that ignored that would land where it never pointed. Push the
+        box to the nearest free edge instead, like Windows' own arrangement.
+        """
+        lay = self._layout()
+        if not lay:
+            return rect
+        out = QRectF(rect)
+        others = [r for dev, r in lay[2].items() if dev != device]
+        for _ in range(3):                 # a push can hit the next neighbour
+            moved = False
+            for o in others:
+                if not out.intersects(o):
+                    continue
+                cands = [
+                    QPointF(o.left() - out.width(), out.top()),
+                    QPointF(o.right(), out.top()),
+                    QPointF(out.left(), o.top() - out.height()),
+                    QPointF(out.left(), o.bottom()),
+                ]
+                pick = min(cands, key=lambda p: abs(p.x() - out.left()) +
+                                                abs(p.y() - out.top()))
+                out.moveTo(pick)
+                moved = True
+            if not moved:
+                break
+        return out
+
+    def _tidy_rect(self, rect, device):
+        """Overlap first, then snapping, then overlap again.
+
+        Snapping to a centre line can put the box back on top of a neighbour;
+        the second push keeps the release point legal.
+        """
+        return self._avoid_overlap(self._snap_rect(
+            self._avoid_overlap(rect, device), device), device)
+
+    def _to_desktop(self, rect):
+        """Widget px -> desktop px, the coordinate space Windows stores."""
+        lay = self._layout()
+        if not lay:
+            return None
+        k, (ox, oy), _rects = lay
+        return (int(round((rect.left() - ox) / k)),
+                int(round((rect.top() - oy) / k)))
+
     def _hover_edge(self, lay):
-        """The reference-screen edge under the cursor, as a QPointF pair.
+        """(reference rect, side) for the placement band under the cursor.
 
         Deliberately not a ghost rectangle of the whole virtual screen: the
         placement would need a full screen-height of free band around the
-        arrangement to fit, and clipping it looked worse than not drawing it. A
-        thick edge line plus an arrow says "click here" in the ~18px there is,
-        and the tooltip carries the words.
+        arrangement to fit, and clipping it looked worse than not drawing it.
+        The cue is a single quiet line centred in the gap (see paintEvent);
+        the cursor and the tooltip carry the rest.
         """
         if not lay or not (self._interactive and self._hover and self._ref):
             return None
         if self._hover == self._side:
             return None
-        _k, _org, rects = lay
-        rb = rects.get(self._ref["device"])
+        rb = lay[2].get(self._ref["device"])
         if rb is None:
             return None
-        s = self._hover
-        if s == "left":
-            return rb, QPointF(rb.left(), rb.center().y()), -1.0, 0.0
-        if s == "right":
-            return rb, QPointF(rb.right(), rb.center().y()), 1.0, 0.0
-        if s == "above":
-            return rb, QPointF(rb.center().x(), rb.top()), 0.0, -1.0
-        return rb, QPointF(rb.center().x(), rb.bottom()), 0.0, 1.0
+        return rb, self._hover
+
+    def _free_reach(self, rb, side, rects):
+        """How many widget px the gap on `side` of `rb` stays clear of other
+        boxes, capped at GUT.
+
+        Boxes sit at scaled real positions, so the band next to the reference
+        edge can be nearly zero when a screen is adjacent (or staircase-offset,
+        with its bottom edge just above the reference top). The marker is
+        placed inside the measured free gap so it can never lie on top of a
+        neighbour - the earlier fixed-length arrow did exactly that.
+        """
+        lim = float(self.GUT)
+        for dev, r in rects.items():
+            if dev == self._ref["device"]:
+                continue
+            if side in ("left", "right"):
+                if r.bottom() < rb.top() + 1 or r.top() > rb.bottom() - 1:
+                    continue          # not alongside this vertical stretch
+                d = (rb.left() - r.right()) if side == "left" \
+                    else (r.left() - rb.right())
+            else:
+                if r.right() < rb.left() + 1 or r.left() > rb.right() - 1:
+                    continue
+                d = (rb.top() - r.bottom()) if side == "above" \
+                    else (r.top() - rb.bottom())
+            if d >= -0.5:
+                lim = min(lim, max(0.0, d))
+        return lim
 
     # --------------------------------------------------------------- paint
     def paintEvent(self, _):
@@ -897,84 +1095,172 @@ class DisplayMap(QWidget):
             return
         k, _org, rects = lay
         for d in self._displays:
-            r = rects[d["device"]]
-            virt = bool(d["virtual"])
-            p.setPen(QPen(QColor(C["accent"] if virt else C["border"]),
-                          1.8 if virt else 1.2))
-            p.setBrush(QBrush(QColor("#1b2a2b" if virt else "#141821")))
-            p.drawRoundedRect(r, 6, 6)
-            self._paint_label(p, d, r)
+            if self._drag and d["device"] == self._drag["device"]:
+                continue                     # drawn on top, under the cursor
+            self._paint_box(p, d, rects[d["device"]])
+        if self._drag and self._drag_rect:
+            d = next((x for x in self._displays
+                      if x["device"] == self._drag["device"]), None)
+            if d is not None:
+                self._paint_box(p, d, self._drag_rect, dragging=True)
         edge = self._hover_edge(lay)
         if edge is not None:
-            rb, tip, dx, dy = edge
-            pen = QPen(QColor(C["accent"]), 2.4)
-            pen.setCapStyle(Qt.RoundCap)
-            p.setPen(pen)
-            p.setBrush(Qt.NoBrush)
-            reach = self.GUT - 5.0
-            if dx:
-                yc = rb.center().y()
-                ex = rb.left() if dx < 0 else rb.right()
-                p.drawLine(QPointF(ex, yc - rb.height() * 0.2),
-                           QPointF(ex, yc + rb.height() * 0.2))
-                shaft = QPointF(ex + dx * reach, tip.y())
-                p.drawLine(QPointF(ex, yc), shaft)
-                self._arrow_head(p, shaft, dx, 0.0)
-            else:
-                xc = rb.center().x()
-                ey = rb.top() if dy < 0 else rb.bottom()
-                p.drawLine(QPointF(xc - rb.width() * 0.2, ey),
-                           QPointF(xc + rb.width() * 0.2, ey))
-                shaft = QPointF(tip.x(), ey + dy * reach)
-                p.drawLine(QPointF(xc, ey), shaft)
-                self._arrow_head(p, shaft, 0.0, dy)
+            rb, side = edge
+            reach = self._free_reach(rb, side, rects)
+            if reach >= 4.0:
+                pen = QPen(QColor(C["accent"]), 2.0)
+                pen.setCapStyle(Qt.RoundCap)
+                p.setPen(pen)
+                # centred in the free gap so the line touches neither the
+                # reference box nor a neighbour
+                off = min(self.GUT, reach) / 2.0
+                if side == "left":
+                    x = rb.left() - off
+                    p.drawLine(QPointF(x, rb.top()), QPointF(x, rb.bottom()))
+                elif side == "right":
+                    x = rb.right() + off
+                    p.drawLine(QPointF(x, rb.top()), QPointF(x, rb.bottom()))
+                elif side == "above":
+                    y = rb.top() - off
+                    p.drawLine(QPointF(rb.left(), y), QPointF(rb.right(), y))
+                else:
+                    y = rb.bottom() + off
+                    p.drawLine(QPointF(rb.left(), y), QPointF(rb.right(), y))
         p.end()
 
-    def _arrow_head(self, p, tip, dx, dy):
-        """Two short strokes so the marker reads as an arrow, not a dash."""
-        import math
-        ang = math.atan2(dy, dx)
-        for s in (math.radians(150), math.radians(-150)):
-            p.drawLine(tip, QPointF(tip.x() + 5.0 * math.cos(ang + s),
-                                    tip.y() + 5.0 * math.sin(ang + s)))
+    def _paint_box(self, p, d, r, dragging=False):
+        virt = bool(d["virtual"])
+        sel = self._selected == d["device"]
+        edge = C["accent"] if (virt or sel) else C["border"]
+        pen = QPen(QColor(edge), 2.6 if sel else (2.4 if dragging else
+                                                  (1.8 if virt else 1.2)))
+        if dragging:
+            pen.setStyle(Qt.DashLine)
+        p.setPen(pen)
+        fill = "#22363a" if dragging else ("#1f3032" if sel else
+                                           ("#1b2a2b" if virt else "#141821"))
+        p.setBrush(QBrush(QColor(fill)))
+        p.drawRoundedRect(r, 6, 6)
+        self._paint_label(p, d, r)
 
     def _paint_label(self, p, d, r):
-        """Kind + resolution inside the box, abbreviated only when it cannot fit."""
-        bold = QFont(self.font())
-        bold.setBold(True)
-        norm = QFont(self.font())
+        """The Identify number first, then what the box is.
+
+        Windows' display settings identify a screen by a number and nothing
+        else. That number is the only handle a person has when the screens are
+        not where the picture says, so it gets the large type; the words shrink
+        to one small line and fall back to abbreviations only when the box is
+        too narrow to carry them.
+        """
         virt = bool(d["virtual"])
-        full_l1 = ("虚拟屏" if virt else "物理屏") + ("·主屏" if d.get("primary") else "")
-        full_l2 = "%dx%d" % (d["width"], d["height"])
-        small_l1 = ("虚" if virt else "物") + ("主" if d.get("primary") else "")
-        small_l2 = res_tag(d["width"], d["height"])
+        # a screen that is switched off has no Windows number either
+        num = str(d.get("number") or "–")
+        nfont = QFont(self.font())
+        nfont.setBold(True)
+        nfont.setPixelSize(int(round(max(11.0, min(24.0, r.height() * 0.40)))))
+        nmet = QFontMetrics(nfont)
+        full = ("虚拟屏" if virt else "物理屏")
+        full += ("·主屏" if d.get("primary") else "")
+        full += " · %dx%d" % (d["width"], d["height"])
+        small = ("虚" if virt else "物") + ("·主" if d.get("primary") else "")
+        small += " · " + res_tag(d["width"], d["height"])
+        sfont = QFont(self.font())
+        sfont.setPixelSize(11)
+        smet = QFontMetrics(sfont)
         avail = max(0.0, r.width() - 10.0)
-        tight = (QFontMetrics(bold).horizontalAdvance(full_l1) > avail or
-                 QFontMetrics(norm).horizontalAdvance(full_l2) > avail)
-        l1, l2 = (small_l1, small_l2) if tight else (full_l1, full_l2)
-        lh = 13.0
-        p.setFont(bold)
-        p.setPen(QColor(C["accent"] if virt else C["text"]))
-        if r.height() < lh * 2 + 2:
-            p.drawText(r, Qt.AlignCenter, l1)
+        sub = small if smet.horizontalAdvance(full) > avail else full
+
+        nh, sh = nmet.height(), smet.height()
+        hot = virt or self._selected == d["device"]
+        if r.height() < nh + sh + 2:
+            # box too short for two lines: the number is what matters
+            p.setFont(nfont)
+            p.setPen(QColor(C["accent"] if hot else C["text"]))
+            p.drawText(r, Qt.AlignCenter, num)
             return
-        y = r.center().y() - lh
-        p.drawText(QRectF(r.left(), y, r.width(), lh), Qt.AlignCenter, l1)
-        p.setFont(norm)
+        top = r.center().y() - (nh + sh) / 2.0
+        p.setFont(nfont)
+        p.setPen(QColor(C["accent"] if hot else C["text"]))
+        p.drawText(QRectF(r.left(), top, r.width(), nh), Qt.AlignCenter, num)
+        p.setFont(sfont)
         p.setPen(QColor(C["muted"]))
-        p.drawText(QRectF(r.left(), y + lh, r.width(), lh), Qt.AlignCenter, l2)
+        p.drawText(QRectF(r.left(), top + nh, r.width(), sh),
+                   Qt.AlignCenter, sub)
 
     # ---------------------------------------------------------------- input
+    def mousePressEvent(self, ev):
+        """Pressing a virtual box picks it up; any box becomes the selection."""
+        if self._interactive and ev.button() == Qt.LeftButton:
+            dev = self._display_at(ev.pos().x(), ev.pos().y())
+            if dev:
+                self._press_device = dev
+                if dev != self._selected:
+                    self._selected = dev
+                    self.selectedChanged.emit(dev)
+                    self.update()
+                if self._movable_at(ev.pos().x(), ev.pos().y()) == dev:
+                    lay = self._layout()
+                    if lay and dev in lay[2]:
+                        self._drag = {"device": dev,
+                                      "press": QPointF(ev.pos()),
+                                      "rect": QRectF(lay[2][dev]),
+                                      "moved": False}
+                        self._drag_rect = QRectF(lay[2][dev])
+                        self._hover = None
+                        self.setCursor(Qt.ClosedHandCursor)
+                        self.setToolTip("松手就按这个位置写回 Windows")
+                        self.update()
+                return
+        super().mousePressEvent(ev)
+
     def mouseMoveEvent(self, ev):
-        side = self._side_at(ev.pos().x(), ev.pos().y()) if self._interactive else None
+        if self._drag:
+            delta = QPointF(ev.pos()) - self._drag["press"]
+            if abs(delta.x()) > 3 or abs(delta.y()) > 3:
+                self._drag["moved"] = True
+            r = QRectF(self._drag["rect"])
+            r.translate(delta.x(), delta.y())
+            r = self._clamp_rect(r)
+            if self._drag["moved"]:
+                r = self._tidy_rect(r, self._drag["device"])
+            self._drag_rect = r
+            self.update()
+            return
+        if not self._interactive:
+            super().mouseMoveEvent(ev)
+            return
+        if self._movable_at(ev.pos().x(), ev.pos().y()):
+            # over a draggable box: say so instead of drawing a placement edge
+            changed = self._hover is not None or self.cursor().shape() != Qt.SizeAllCursor
+            self._hover = None
+            self.setCursor(Qt.SizeAllCursor)
+            self.setToolTip("拖动这块屏，松手就按这个位置写回 Windows")
+            if changed:
+                self.update()
+            super().mouseMoveEvent(ev)
+            return
+        if self._display_at(ev.pos().x(), ev.pos().y()):
+            # the primary: selectable for its resolution row, pinned in place
+            changed = self._hover is not None
+            self._hover = None
+            self.setCursor(Qt.PointingHandCursor)
+            self.setToolTip("主屏固定在 (0,0)，不能拖；点一下选中它改分辨率/缩放")
+            if changed:
+                self.update()
+            super().mouseMoveEvent(ev)
+            return
+        side = self._side_at(ev.pos().x(), ev.pos().y())
         if side != self._hover:
             self._hover = side
             self.setCursor(Qt.PointingHandCursor if side else Qt.ArrowCursor)
-            self.setToolTip(("点这里：虚拟屏放到%s" % self.SIDE_CN[side]) if side else "")
+            self.setToolTip(("点击空隙：把虚拟屏放到主屏%s"
+                             % self.SIDE_GO[side]) if side else "")
             self.update()
         super().mouseMoveEvent(ev)
 
     def leaveEvent(self, ev):
+        if self._drag:
+            return
         if self._hover:
             self._hover = None
             self.setCursor(Qt.ArrowCursor)
@@ -983,6 +1269,23 @@ class DisplayMap(QWidget):
         super().leaveEvent(ev)
 
     def mouseReleaseEvent(self, ev):
+        if self._drag and ev.button() == Qt.LeftButton:
+            drag, rect = self._drag, self._drag_rect
+            self._drag, self._drag_rect = None, None
+            self._press_device = None
+            self.setCursor(Qt.ArrowCursor)
+            self.setToolTip("")
+            self.update()
+            if drag["moved"] and rect is not None:
+                pos = self._to_desktop(rect)
+                if pos:
+                    self.moveRequested.emit(drag["device"], pos[0], pos[1])
+            # a press that did not move is not a placement click either
+            return
+        if self._press_device:
+            # a click on a box only selects it; placement lives outside the boxes
+            self._press_device = None
+            return
         if self._interactive and ev.button() == Qt.LeftButton:
             side = self._side_at(ev.pos().x(), ev.pos().y())
             if side:
@@ -1005,13 +1308,31 @@ class Main(QWidget):
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setMinimumWidth(620)
         self.setMinimumHeight(720)
+        # Start big enough that the layout card's resolution/scaling row (and
+        # its 应用) is on screen without scrolling; clamped for small screens.
+        scr = QApplication.primaryScreen()
+        avail = scr.availableGeometry() if scr else None
+        w, h = 660, 860
+        if avail is not None:
+            w = min(w, max(self.minimumWidth(), avail.width() - 60))
+            h = min(h, max(self.minimumHeight(), avail.height() - 60))
+        self.resize(w, h)
+        if avail is not None:
+            self.move(avail.center().x() - w // 2,
+                      avail.center().y() - h // 2)
+        # size to restore when moving between screens; resizeEvent updates it
+        # only for sizes the user chose on the current screen
+        self._base_size = self.size()
+        self._base_screen = None
+        self._adjusting = False
         self._threads = []
         self._st = {}
         # A pick in the resolution combo (or a typed count) is a request, not a
         # fact until 应用 runs. The poll rebuilds both from whatever the driver
         # reports, so without these a pending value reverts under the cursor.
-        self._mode_pending = None
         self._count_dirty = None
+        self._sel_device = None
+        self._res_sig = None
         self._build()
         self.reload()
 
@@ -1030,6 +1351,54 @@ class Main(QWidget):
         # a frameless window must opt in explicitly, or the taskbar entry
         # disappears along with the frame
         force_taskbar_button(self)
+        wh = self.windowHandle()
+        if wh is not None and not getattr(self, "_screen_wired", False):
+            self._screen_wired = True
+            wh.screenChanged.connect(self._screen_changed)
+
+    def _screen_changed(self, scr):
+        """Keep the panel inside whatever screen it was dragged to.
+
+        Qt keeps the *logical* size across per-monitor DPI changes, so the
+        660x860 window that fit the 200% main screen became 1155x1505 physical
+        px on the 175% second screen - 65px taller than that screen. Cap to
+        the new screen's available area, keep the title bar on-screen, and
+        restore the size the user chose when the next screen has room for it.
+        """
+        if scr is None:
+            return
+        QTimer.singleShot(0, lambda: self._fit_to_screen(scr))
+
+    def _fit_to_screen(self, scr):
+        if scr is None:
+            return
+        avail = scr.availableGeometry()
+        base = getattr(self, "_base_size", self.size())
+        max_w = max(self.minimumWidth(), avail.width() - 40)
+        max_h = max(self.minimumHeight(), avail.height() - 40)
+        w = max(self.minimumWidth(), min(base.width(), max_w))
+        h = max(self.minimumHeight(), min(base.height(), max_h))
+        self._adjusting = True
+        try:
+            if (w, h) != (self.width(), self.height()):
+                # resize from the top-left corner: the window stays where the
+                # user dropped it, it only gets shorter/wider to fit
+                self.resize(w, h)
+        finally:
+            self._adjusting = False
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        # Remember the size the user chose, but not the size Qt imposes while
+        # crossing a DPI boundary: that one belongs to the new screen, not to
+        # the user, and restoring it would defeat the cap above.
+        if getattr(self, "_adjusting", False):
+            return
+        scr = self.screen()
+        if scr is getattr(self, "_base_screen", None):
+            self._base_size = self.size()
+        else:
+            self._base_screen = scr
 
     # ---------------- construction ----------------
 
@@ -1122,11 +1491,56 @@ class Main(QWidget):
         # are, the buttons only move them
         self.map = DisplayMap()
         self.map.sideClicked.connect(self._place)
+        self.map.moveRequested.connect(self._move_display)
+        self.map.selectedChanged.connect(self._screen_selected)
         l5.addWidget(self.map)
         self.lbl_map_legend = QLabel("")
         self.lbl_map_legend.setObjectName("Key")
         self.lbl_map_legend.setWordWrap(True)
         l5.addWidget(self.lbl_map_legend)
+
+        # the screen picked in the schematic owns the two settings Windows puts
+        # under its own arrangement picture: resolution and scaling
+        self.lbl_screen = QLabel("—")
+        self.lbl_screen.setObjectName("Key")
+        self.lbl_screen.setWordWrap(True)
+        l5.addWidget(self.lbl_screen)
+
+        # One screen's two fields share a row. The hierarchy is carried by
+        # spacing, not by a fixed label column: each label hugs its own box,
+        # the two groups get a wider gap, and 应用 lives at the row's end so it
+        # reads as the action for both. Four equal gaps (and 74px-wide labels)
+        # made it look like four unrelated controls.
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        rlab = QLabel("分辨率")
+        rlab.setObjectName("Key")
+        row.addWidget(rlab)
+        self.cmb_res = QComboBox()
+        self.cmb_res.setObjectName("Res")
+        self.cmb_res.setMaxVisibleItems(16)
+        Chevron(self.cmb_res)
+        WheelNeedsFocus(self.cmb_res)
+        row.addWidget(self.cmb_res)
+        row.addSpacing(14)                 # group gap = 20px with the spacing
+        zlab = QLabel("缩放")
+        zlab.setObjectName("Key")
+        row.addWidget(zlab)
+        self.cmb_scale = QComboBox()
+        self.cmb_scale.setObjectName("Scale")
+        self.cmb_scale.setMaxVisibleItems(12)
+        Chevron(self.cmb_scale)
+        WheelNeedsFocus(self.cmb_scale)
+        row.addWidget(self.cmb_scale)
+        row.addStretch(1)
+        # No 应用 button: a bare button at the row's end was the most
+        # conspicuous thing on the card. Windows' own display page applies a
+        # pick as soon as it is made, and so does this - the hint says so
+        # instead of leaving a button to explain it.
+        self.lbl_instant = QLabel("选中即生效")
+        self.lbl_instant.setObjectName("Hint")
+        row.addWidget(self.lbl_instant)
+        l5.addLayout(row)
 
         def seg_row(title, items, handler, target=None):
             target = l5 if target is None else target
@@ -1156,63 +1570,75 @@ class Main(QWidget):
              ("physical", "仅物理屏", False),
              ("clone", "复制", False)],
             self._set_topo)
+        # mode -> primary -> placement is the order the facts depend on:
+        # placement only means something in extend mode, and it is measured
+        # from whichever screen is primary
+        self.prim_btns = seg_row(
+            "主显示器",
+            [("physical", "物理屏", False), ("virtual", "虚拟屏", False)],
+            self._make_primary)
         self.pos_btns = seg_row(
             "虚拟屏位置",
             [("left", "在左侧", False), ("right", "在右侧", False),
              ("above", "在上方", False), ("below", "在下方", False)],
             self._place)
-        self.prim_btns = seg_row(
-            "主显示器",
-            [("physical", "物理屏", False), ("virtual", "虚拟屏", False)],
-            self._make_primary)
         bl2.addWidget(c5)
 
         # ---- streaming (Sunshine) ----
         c6, l6 = card("串流（Sunshine）")
+        # One conclusion first, then the two choices, then the technical
+        # detail. The old order mixed a success sentence, a caveat and the
+        # raw conf, so the card never read top-to-bottom.
         self.lbl_ss_state = QLabel("—")
         self.lbl_ss_state.setObjectName("Value")
+        self.lbl_ss_state.setWordWrap(True)
         l6.addWidget(self.lbl_ss_state)
-        self.lbl_ss_cfg = QLabel("—")
-        self.lbl_ss_cfg.setObjectName("Key")
-        self.lbl_ss_cfg.setWordWrap(True)
-        l6.addWidget(self.lbl_ss_cfg)
-        self.ss_btns = seg_row(
-            "串流画面",
-            [("system", "跟随系统", False), ("physical", "物理屏", False),
-             ("virtual", "虚拟屏", False)],
-            self._pick_stream_target, l6)
+        self.lbl_ss_note = QLabel("")
+        self.lbl_ss_note.setObjectName("Hint")
+        self.lbl_ss_note.setStyleSheet(
+            "font-size:11px;color:%s;" % C["warning"])
+        self.lbl_ss_note.setWordWrap(True)
+        self.lbl_ss_note.setVisible(False)
+        l6.addWidget(self.lbl_ss_note)
+
+        # The target row is rebuilt from Sunshine's own enumeration: only a
+        # screen it listed at startup can be pinned through output_name. Fixed
+        # 「物理屏 / 虚拟屏」 buttons lied whenever there were two physical
+        # screens, and greyed the virtual screen out when its log entry simply
+        # had no GDI name.
+        self.ss_row = QWidget()
+        self.ss_row.setObjectName("Row")
+        self.ss_lay = QHBoxLayout(self.ss_row)
+        self.ss_lay.setContentsMargins(0, 0, 0, 0)
+        self.ss_lay.setSpacing(6)
+        sslab = QLabel("手机看哪块")
+        sslab.setObjectName("Key")
+        sslab.setMinimumWidth(74)
+        self.ss_lay.addWidget(sslab)
+        self.ss_btns = {}
+        l6.addWidget(self.ss_row)
+
         self.others_btns = seg_row(
-            "另一块屏",
+            "其他屏",
             [("keep", "保持扩展", False), ("blank", "串流时关掉", False)],
             self._pick_others, l6)
-        # the one line that settles arguments: which screen the phone is looking
-        # at, by name -- "跟随系统" alone never said it
+        # the one line that settles arguments: which screen the phone is not
+        # looking at, by name
         self.lbl_ss_where = QLabel("—")
         self.lbl_ss_where.setObjectName("Key")
         self.lbl_ss_where.setWordWrap(True)
         l6.addWidget(self.lbl_ss_where)
+        self.lbl_ss_cfg = QLabel("—")
+        self.lbl_ss_cfg.setObjectName("Key")
+        self.lbl_ss_cfg.setStyleSheet(
+            "font-size:10.5px;color:%s;" % C["faint"])
+        self.lbl_ss_cfg.setWordWrap(True)
+        l6.addWidget(self.lbl_ss_cfg)
+        self.others_btns["keep"].setToolTip(
+            "其他屏照常可用，只是手机看不到它们")
+        self.others_btns["blank"].setToolTip(
+            "串流期间只保留手机看的那块，其余屏（包括物理屏）会熄灭；断开后恢复")
         bl2.addWidget(c6)
-
-        # ---- active mode ----
-        c2, l2 = card("虚拟屏分辨率（现在用哪个）")
-        self.lbl_mode_hint = QLabel(
-            "从驱动提供的模式里选一个，虚拟屏立即切过去，不需要重载驱动。\n"
-            "只影响虚拟屏，物理显示器不受影响。")
-        self.lbl_mode_hint.setObjectName("Hint")
-        self.lbl_mode_hint.setWordWrap(True)
-        l2.addWidget(self.lbl_mode_hint)
-        r = QHBoxLayout()
-        r.setSpacing(8)
-        self.cmb_mode = QComboBox()
-        self.cmb_mode.setMinimumWidth(180)
-        Chevron(self.cmb_mode)
-        WheelNeedsFocus(self.cmb_mode)
-        r.addWidget(self.cmb_mode, 1)
-        self.btn_apply = QPushButton("应用")
-        self.btn_apply.setObjectName("Primary")
-        r.addWidget(self.btn_apply)
-        l2.addLayout(r)
-        bl2.addWidget(c2)
 
         # ---- config ----
         c3, l3 = card("驱动配置（驱动提供什么）")
@@ -1228,6 +1654,7 @@ class Main(QWidget):
         self.spn_count.setRange(1, 8)
         rc.addWidget(self.spn_count)
         self.btn_count = QPushButton("应用")
+        self.btn_count.setObjectName("Compact")
         rc.addWidget(self.btn_count)
         rc.addStretch(1)
         l3.addLayout(rc)
@@ -1248,6 +1675,7 @@ class Main(QWidget):
         ra.addWidget(QLabel("刷新"))
         ra.addWidget(self.spn_hz)
         self.btn_add_res = QPushButton("添加")
+        self.btn_add_res.setObjectName("Compact")
         ra.addWidget(self.btn_add_res)
         ra.addStretch(1)
         l3.addLayout(ra)
@@ -1280,9 +1708,9 @@ class Main(QWidget):
         bl2.addStretch(1)
 
         # ---- signals ----
-        self.btn_apply.clicked.connect(self._apply_mode)
         self.btn_count.clicked.connect(self._apply_count)
-        self.cmb_mode.activated.connect(self._mode_picked)
+        self.cmb_res.activated.connect(self._resolution_picked)
+        self.cmb_scale.activated.connect(self._scaling_picked)
         self.spn_count.valueChanged.connect(self._count_edited)
         self.btn_add_res.clicked.connect(self._add_res)
         self.btn_reload.clicked.connect(self._reload)
@@ -1306,26 +1734,16 @@ class Main(QWidget):
         self.reload()
 
     def _flash(self, text, color):
-        self.pill.setText(str(text)[:40])
+        text = str(text)
+        self.pill.setText(text[:40])
+        # the pill is one line; keep the full message reachable on hover
+        self.pill.setToolTip(text if len(text) > 40 else "")
         self.pill.setStyleSheet(
             "QLabel#Pill { font-size:11px; font-weight:600; padding:2px 10px;"
             "border-radius:9px; color:%s; background-color:#1e232c; }" % color)
 
-    def _mode_picked(self, _index):
-        """Keep a combo pick (popup, keyboard or wheel) as the shown choice.
-
-        'activated' only fires on user interaction, so the poll's own
-        setCurrentIndex never marks anything pending.
-        """
-        self._mode_pending = self.cmb_mode.currentData()
-
     def _count_edited(self, value):
         self._count_dirty = value
-
-    def _apply_mode(self):
-        data = self.cmb_mode.currentData()
-        if data:
-            self._act(backend.set_mode, data[0], data[1], data[2])
 
     def _apply_count(self):
         self._act(backend.set_count, self.spn_count.value())
@@ -1353,18 +1771,58 @@ class Main(QWidget):
         next poll just like a display change does.
         """
         ss = backend.sunshine_status()
-        ids = ss.get("display_ids") or {}
         st = ss.get("settings") or {}
         out = (st.get("output_name") or "").strip()
         dd = (st.get("dd_configuration_option") or "disabled").strip()
-        if out and out == ids.get("physical"):
-            target = "physical"
-        elif out and out == ids.get("virtual"):
-            target = "virtual"
+        targets = ss.get("targets") or []
+        keys = {t["key"] for t in targets}
+        if not out:
+            target = "system"
+        elif out in keys:
+            target = out
         else:
-            target = "system"          # unset, or an id that is no longer attached
+            target = "stale"          # pinned to a screen Sunshine no longer lists
         return {"target": target, "keep": dd != "ensure_only_display",
-                "ids": ids, "settings": st}
+                "ids": ss.get("display_ids") or {}, "targets": targets,
+                "settings": st}
+
+    def _add_ss_btn(self, key, text, tip=""):
+        b = QPushButton(text)
+        b.setObjectName("Seg")
+        b.setMinimumWidth(0)
+        if tip:
+            b.setToolTip(tip)
+        b.clicked.connect(lambda _=False, k=key: self._pick_stream_target(k))
+        self.ss_lay.addWidget(b)
+        self.ss_btns[key] = b
+
+    def _rebuild_stream_targets(self, targets):
+        """Rebuild the target row only when Sunshine's list actually changes.
+
+        Rebuilding every poll would flicker and steal focus; the keys, numbers
+        and names are enough of a signature.
+        """
+        sig = tuple((t.get("key"), t.get("number"), t.get("kind"),
+                     t.get("name")) for t in targets)
+        if sig == getattr(self, "_ss_sig", None):
+            return
+        self._ss_sig = sig
+        while self.ss_lay.count() > 1:        # keep the row label at index 0
+            item = self.ss_lay.takeAt(1)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self.ss_btns = {}
+        # "follow the primary" is always available: it is the config with no
+        # output_name at all
+        self._add_ss_btn("system", "跟随主屏",
+                         "不钉屏：Sunshine 抓主显示器那一块")
+        for t in targets:
+            num = t.get("number") or "?"
+            kind = "虚拟" if t.get("kind") == "virtual" else "物理"
+            tip = "%s（%s）" % (t.get("name") or "未命名", t.get("gdi") or "")
+            self._add_ss_btn(t["key"], "%s 号屏 · %s" % (num, kind), tip)
+        self.ss_lay.addStretch(1)
 
     def _pick_stream_target(self, key):
         """Which screen the phone sees. Keeps the other axis as it stands."""
@@ -1372,16 +1830,18 @@ class Main(QWidget):
         self._need_admin(backend.set_stream_target, key, cur["keep"])
 
     def _pick_others(self, key):
-        """Whether the other screen goes dark during a stream.
+        """Whether the other screens go dark during a stream.
 
-        Meaningless while the target is '跟随系统' (that option is what stops
-        Sunshine touching the topology), so the row is greyed out there; if a
-        click still arrives, pin the virtual screen - the option the row exists
-        for.
+        Meaningless while the target is '跟随主屏' (that option is what stops
+        Sunshine touching the topology), so the row is greyed out there; a
+        click that still arrives is ignored rather than silently switching
+        the target.
         """
         cur = self._stream_axes()
-        target = cur["target"] if cur["target"] != "system" else "virtual"
-        self._need_admin(backend.set_stream_target, target, key == "keep")
+        if cur["target"] in ("system", "stale"):
+            return
+        self._need_admin(backend.set_stream_target, cur["target"],
+                         key == "keep")
 
     def _set_topo(self, key):
         # "only the virtual display" switches the physical monitor off - if the
@@ -1402,6 +1862,54 @@ class Main(QWidget):
 
     def _place(self, side):
         self._act(backend.place_beside, side)
+
+    def _move_display(self, device, x, y):
+        """A drag in the schematic landed: write the spot into Windows."""
+        self._act(backend.move_display, device, x, y)
+
+    def _screen_selected(self, device):
+        """The schematic says which box was clicked; edit that screen."""
+        self._sel_device = device
+        self.map.set_selected(device)
+        d = next((x for x in (self._st.get("displays") or [])
+                  if x["device"] == device), None)
+        self._fill_screen_card(d, self._st.get("scaling") or {})
+
+    def _resolution_picked(self, _index):
+        """A resolution was picked from the dropdown - apply it right away.
+
+        'activated' only fires on user interaction, so the poll's own
+        setCurrentIndex never calls this. The current refresh rate is kept
+        when the picked size supports it, otherwise the fastest one is used.
+        """
+        dev = getattr(self, "_sel_device", None)
+        data = self.cmb_res.currentData()
+        if not dev or not data:
+            return
+        d = next((x for x in (self._st.get("displays") or [])
+                  if x["device"] == dev), None)
+        if d is None:
+            return
+        w, h = data
+        if (w, h) == (d["width"], d["height"]):
+            return
+        hzs = [hz for (mw, mh, hz) in self._cached_modes(d)
+               if (mw, mh) == (w, h)]
+        if not hzs:
+            return
+        hz = d["hz"] if d["hz"] in hzs else max(hzs)
+        self._act(backend.set_display_mode, dev, w, h, hz)
+
+    def _scaling_picked(self, _index):
+        """A scaling was picked - apply it right away, like Windows' page."""
+        dev = getattr(self, "_sel_device", None)
+        pct = self.cmb_scale.currentData()
+        if not dev or not pct:
+            return
+        now = (self._st.get("scaling") or {}).get(dev)
+        if int(pct) == now:
+            return
+        self._act(backend.set_display_scaling, dev, int(pct))
 
     def _make_primary(self, which):
         self._act(backend.make_primary, which)
@@ -1459,6 +1967,7 @@ class Main(QWidget):
         self._apply_status(s)
 
     def reload(self):
+        self._modes_cache = None          # driver work may change the list
         s = backend.status()
         self._st = s
         self._apply_status(s)
@@ -1473,7 +1982,6 @@ class Main(QWidget):
                               "无法载入 vdd_core.py：%s" % s.get("error", ""), None)
             for v in (self.val_dev, self.val_virt, self.val_phys, self.val_cfg):
                 v.setText("—")
-            self.cmb_mode.clear()
             return
 
         installed = s.get("device_installed")
@@ -1551,41 +2059,6 @@ class Main(QWidget):
             self.banner.setVisible(False)
             self._st["_banner_mode"] = None
 
-        # mode combo
-        self.cmb_mode.blockSignals(True)
-        self.cmb_mode.clear()
-        cur = (vd["width"], vd["height"], vd["hz"]) if vd else None
-        modes = s.get("modes", [])
-        for m in modes:
-            self.cmb_mode.addItem("%dx%d @ %dHz" % m, m)
-        # follow the driver, except while the user has a pick waiting for 应用 -
-        # otherwise a refresh (the display state changed under them) reverts
-        # the selection they are about to apply
-        if self._mode_pending == cur or self._mode_pending not in modes:
-            self._mode_pending = None
-        want = self._mode_pending or cur
-        if want:
-            for i in range(self.cmb_mode.count()):
-                if self.cmb_mode.itemData(i) == want:
-                    self.cmb_mode.setCurrentIndex(i)
-                    break
-        self.cmb_mode.setEnabled(bool(modes))
-        self.cmb_mode.blockSignals(False)
-        self.btn_apply.setEnabled(bool(modes))
-
-        # keep both hints honest about the live state, so the two cards are
-        # self-explanatory instead of leaving the user to work out which one
-        # needs a driver reload and which takes effect immediately
-        if s.get("modes"):
-            self.lbl_mode_hint.setText(
-                "\u3000\u3000从下面 %d 个模式里挑一个，虚拟屏立即切过去，"
-                "不需要重载驱动，也不影响物理显示器。"
-                "点一下下拉框选中后，滚轮可以直接翻页。" % len(s["modes"]))
-        else:
-            self.lbl_mode_hint.setText(
-                "\u3000\u3000驱动已安装但没检测到虚拟屏，暂时没有可选模式。"
-                "先到下面的「驱动配置」确认设置，再重载驱动。")
-
         if cfg:
             if self._count_dirty in (None, cfg["count"]):
                 self.spn_count.blockSignals(True)
@@ -1639,12 +2112,18 @@ class Main(QWidget):
             mark(b, (key == "virtual" and vd_primary) or
                     (key == "physical" and not vd_primary))
             b.setEnabled(bool(vd) and bool(phys))
+            # number the two candidates like the picture does: with two
+            # physical screens "物理屏" alone never said which one
+            d = (phys[0] if phys else None) if key == "physical" else vd
+            if d is not None:
+                b.setText("%s 号屏 · %s" % (d.get("number") or "?",
+                                            "物理" if key == "physical" else "虚拟"))
         # Switching the primary to the virtual screen is not cosmetic: the
         # taskbar and the mouse follow it onto a screen nobody can see. Say so
         # where the click happens rather than in a doc nobody opens.
         self.prim_btns["virtual"].setToolTip(
             "主显示器会跳到虚拟屏 —— 任务栏和鼠标都跟过去，而那块屏你看不见。\n"
-            "要回来：再点「物理屏」")
+            "要回来：再点左边的物理屏")
         self.prim_btns["physical"].setToolTip("把主显示器切回物理屏（当前那块能看见的）")
 
         # position only means something while both screens are on. The side is
@@ -1656,10 +2135,24 @@ class Main(QWidget):
         for key, b in self.pos_btns.items():
             mark(b, key == side)
             b.setEnabled(movable)
+        # which screen the resolution/scaling row edits: whatever was clicked
+        # in the picture, defaulting to the virtual one so the card is useful
+        # on first open
+        attached = [d for d in (s.get("displays") or []) if d.get("attached")]
+        sel = getattr(self, "_sel_device", None)
+        if sel not in [d["device"] for d in attached]:
+            pick = vd or phys or (attached[0] if attached else None)
+            sel = pick["device"] if pick else None
+            self._sel_device = sel
         self.map.set_state(s.get("displays") or [], s.get("reference"),
-                           vd, side, exact, movable)
-        self.map.setToolTip("点示意图里主屏的某一侧，就把虚拟屏挪过去"
-                            if movable else "切回「扩展」才能挪虚拟屏的位置")
+                           vd, side, exact, movable, selected=sel)
+        self._fill_screen_card(
+            next((d for d in attached if d["device"] == sel), None),
+            s.get("scaling") or {})
+        self.map.setToolTip(
+            "拖动虚拟屏或物理副屏可放到任意位置（主屏固定在 0,0）；"
+            "点主屏的某一侧则把虚拟屏贴到那一侧"
+            if movable else "切回「扩展」才能挪虚拟屏的位置")
 
         # the schematic abbreviates when a box gets small, so the exact readings
         # live here instead
@@ -1684,7 +2177,9 @@ class Main(QWidget):
                     % cur)
         else:
             hint = ("当前：%s。这里改的就是 Windows 自己的显示模式，"
-                    "跟系统设置里的「多显示器」是同一处，两边会同步。" % cur)
+                    "跟系统设置里的「多显示器」是同一处，两边会同步。"
+                    "图中数字与系统设置里「标识」的编号一致；除主屏外都能直接拖。"
+                    % cur)
         if topo == "clone":
             hint += "复制模式下两块屏必须用同一分辨率。"
         self.lbl_layout_hint.setText(hint)
@@ -1692,80 +2187,180 @@ class Main(QWidget):
             "font-size:11px;color:%s;font-weight:600;"
             % (C["warning"] if topo == "virtual" else C["muted"]))
 
+    def _fill_screen_card(self, d, scaling):
+        """Resolution + scaling of the screen picked in the picture.
+
+        Both values are read back from Windows on every poll, so a change made
+        in the system settings shows up here without the panel claiming a
+        stale value. The resolution list is Windows' own EnumDisplaySettings
+        list, collapsed to one line per size with the fastest refresh behind
+        it; a pick keeps the current refresh rate when that size supports it.
+        """
+        if d is None:
+            self.lbl_screen.setText("没有可选的屏")
+            self.cmb_res.clear()
+            self.cmb_scale.clear()
+            self.cmb_res.setEnabled(False)
+            self.cmb_scale.setEnabled(False)
+            self.lbl_instant.setVisible(False)
+            return
+
+        virt = bool(d["virtual"])
+        self.lbl_screen.setText(
+            "选中的是 %s 号 %s（%s）—— 点图中另一块可切换。"
+            % (d.get("number"), "虚拟屏" if virt else "物理屏",
+               friendly_device(d["device"])))
+        self.cmb_res.setEnabled(True)
+        self.cmb_scale.setEnabled(True)
+        self.lbl_instant.setVisible(True)
+
+        modes = self._cached_modes(d)
+        best = {}
+        for (w, h, hz) in modes:
+            key = (w, h)
+            if key not in best or hz > best[key]:
+                best[key] = hz
+        opts = sorted(best.items(), key=lambda kv: (-kv[0][0] * kv[0][1],
+                                                    -kv[0][1]))
+        sig = (d["device"], tuple(opts), d["width"], d["height"])
+        if sig != getattr(self, "_res_sig", None):
+            self._res_sig = sig
+            self.cmb_res.blockSignals(True)
+            self.cmb_res.clear()
+            for (w, h), _hz in opts:
+                self.cmb_res.addItem("%d × %d" % (w, h), (w, h))
+            for i in range(self.cmb_res.count()):
+                w, h = self.cmb_res.itemData(i)
+                if (w, h) == (d["width"], d["height"]):
+                    self.cmb_res.setCurrentIndex(i)
+                    break
+            self.cmb_res.blockSignals(False)
+
+        sc = scaling.get(d["device"])
+        opts = backend.scale_options()
+        if sc and sc not in opts:
+            opts = sorted(opts + [sc])
+        ssig = (d["device"], tuple(opts), sc)
+        if ssig != getattr(self, "_scale_sig", None):
+            self._scale_sig = ssig
+            self.cmb_scale.blockSignals(True)
+            self.cmb_scale.clear()
+            for pct in opts:
+                self.cmb_scale.addItem("%d%%" % pct, pct)
+            if sc:
+                for i in range(self.cmb_scale.count()):
+                    if self.cmb_scale.itemData(i) == sc:
+                        self.cmb_scale.setCurrentIndex(i)
+                        break
+            self.cmb_scale.blockSignals(False)
+        self.lbl_instant.setToolTip(
+            "下拉里选一个就立即生效，和 Windows 设置一样。\n"
+            "已经打开的应用大多会跟着变，少数旧程序要重开才跟随。\n"
+            "缩放档位有上限，超出会被夹住，结果以回读为准。")
+
+    def _cached_modes(self, d):
+        """EnumDisplaySettings over a 200-mode 4K panel costs ~68ms.
+
+        The 3-second poll runs this on the UI thread, so keep the list until
+        the screen's own mode (or the selection) changes. A full reload clears
+        it, which is what happens after driver work.
+        """
+        key = (d["device"], d["width"], d["height"], d["hz"])
+        cache = getattr(self, "_modes_cache", None)
+        if cache and cache[0] == key:
+            return cache[1]
+        modes = tuple(backend.display_modes(d["device"]))
+        self._modes_cache = (key, modes)
+        return modes
+
     def _apply_streaming(self, s, vd):
-        """Reflect Sunshine's state on the streaming card."""
+        """One conclusion, two choices, then the raw conf."""
         ss = backend.sunshine_status()
         if not ss.get("installed"):
+            self._rebuild_stream_targets([])
             self.lbl_ss_state.setText("未安装 Sunshine（串流功能不可用）")
             self.lbl_ss_state.setStyleSheet(
                 "font-size:11.5px;color:%s;" % C["muted"])
-            self.lbl_ss_cfg.setText("")
+            self.lbl_ss_note.setVisible(False)
             self.lbl_ss_where.setText("")
+            self.lbl_ss_cfg.setText("")
             for b in self.ss_btns.values():
+                b.setEnabled(False)
+            for b in self.others_btns.values():
                 b.setEnabled(False)
             return
 
         st = ss.get("settings") or {}
         out = (st.get("output_name") or "").strip()
         mode = (st.get("dd_configuration_option") or "disabled").strip()
-        ids = ss.get("display_ids") or {}
+        targets = ss.get("targets") or []
         axes = self._stream_axes()
         target, keep = axes["target"], axes["keep"]
 
+        self._rebuild_stream_targets(targets)
         for key, b in self.ss_btns.items():
             self._mark(b, key == target)
-            # an option is only pickable once Sunshine has reported that screen
-            b.setEnabled(True if key == "system" else bool(ids.get(key)))
+            b.setEnabled(True)
         for key, b in self.others_btns.items():
             self._mark(b, (key == "keep") == keep)
-            b.setEnabled(target != "system")
+            b.setEnabled(target not in ("system", "stale"))
 
-        if target == "system":
-            state = "跟随系统 ✓  手机看到主显示器那一块，系统里怎么设就怎么串"
-            col = C["success"]
-        elif ids.get(target):
-            name = "物理屏" if target == "physical" else "虚拟屏"
-            state = "%s ✓  手机只看到%s（%s）" % (
-                name, name, "另一块照常可用" if keep else "串流时另一块会黑")
-            col = C["success"]
-        else:
-            state = "串流目标未明确：output_name=%s / %s" % (out or "未设", mode)
-            col = C["warning"]
-        if not ids.get("virtual") and target != "virtual":
-            state += "　日志里还没有虚拟屏的 device_id（重启一次 Sunshine 才有）"
-            col = C["warning"]
-
-        self.lbl_ss_state.setText(state)
-        self.lbl_ss_state.setStyleSheet(
-            "font-size:11.5px;font-weight:600;color:%s;" % col)
-        self.lbl_ss_cfg.setText(
-            "output_name = %s\ndd_configuration_option = %s" % (out or "（未设）", mode))
-
-        # Which physical screen the phone is looking at, stated as a fact.
-        # "跟随系统" is not "the whole desktop" -- Sunshine duplicates one display
-        # (the primary), and that single fact is what people can never tell from
-        # the mode name. streamcheck.py --where proves it from the session log.
         tgt = backend.capture_target(st, s.get("displays") or [])
         kind = tgt.get("kind")
         if kind in ("primary", "named"):
-            txt = "手机看到 = %s" % tgt.get("label", "?")
-            if tgt.get("others"):
-                txt += "\n看不到另一块的画面：%s" % "、".join(tgt["others"])
-                if kind == "primary" and any(
-                        "虚拟屏" in o for o in tgt["others"]):
-                    txt += "\n要手机看虚拟屏：点「虚拟屏」，或把主显示器改成虚拟屏"
-            self.lbl_ss_where.setText(txt)
+            d = tgt.get("display") or {}
+            if d.get("number"):
+                label = "%s 号屏 · %s（%s %dx%d%s）" % (
+                    d.get("number"), "虚拟" if d.get("virtual") else "物理",
+                    friendly_device(d.get("device")),
+                    d.get("width"), d.get("height"),
+                    "·主屏" if d.get("primary") else "")
+            else:
+                label = tgt.get("label", "?")
+            self.lbl_ss_state.setText("手机看到 = %s" % label)
+            self.lbl_ss_state.setStyleSheet(
+                "font-size:11.5px;font-weight:600;color:%s;" % C["success"])
+        elif kind == "stale":
+            self.lbl_ss_state.setText(
+                "手机看到 = 不确定：钉的屏不在 Sunshine 枚举里")
+            self.lbl_ss_state.setStyleSheet(
+                "font-size:11.5px;font-weight:600;color:%s;" % C["danger"])
+        else:
+            self.lbl_ss_state.setText("手机看到 = 未知")
+            self.lbl_ss_state.setStyleSheet(
+                "font-size:11.5px;font-weight:600;color:%s;" % C["warning"])
+
+        notes = []
+        if kind == "stale":
+            notes.append("output_name 指向的 device_id 不在 Sunshine 这次的屏列表里；"
+                         "重启 Sunshine，或点「跟随主屏」重新选。")
+        if not any(t.get("kind") == "virtual" for t in targets):
+            notes.append("Sunshine 还没枚举到虚拟屏；重启一次 Sunshine 后，"
+                         "这里会出现「3 号屏 · 虚拟」。")
+        self.lbl_ss_note.setText("\n".join(notes))
+        self.lbl_ss_note.setVisible(bool(notes))
+
+        # what the phone is *not* looking at, in the same numbered language
+        # the buttons above use
+        td = tgt.get("display") or {}
+        others = []
+        for d in (s.get("displays") or []):
+            if not d.get("attached") or d["device"] == td.get("device"):
+                continue
+            others.append("%s 号屏 · %s（%s %dx%d）" % (
+                d.get("number") or "?", "虚拟" if d.get("virtual") else "物理",
+                friendly_device(d.get("device")), d.get("width"),
+                d.get("height")))
+        if kind in ("primary", "named") and others:
+            self.lbl_ss_where.setText("手机看不到：%s" % "、".join(others))
             self.lbl_ss_where.setStyleSheet(
                 "font-size:11px;color:%s;" % C["muted"])
-        elif kind == "stale":
-            self.lbl_ss_where.setText("手机看到 = 说不准\n%s（%s）"
-                                      % (tgt.get("label", ""), tgt.get("note", "")))
-            self.lbl_ss_where.setStyleSheet(
-                "font-size:11px;color:%s;" % C["danger"])
         else:
-            self.lbl_ss_where.setText("手机看到 = %s" % (tgt.get("label") or "未知"))
-            self.lbl_ss_where.setStyleSheet(
-                "font-size:11px;color:%s;" % C["warning"])
+            self.lbl_ss_where.setText("")
+
+        self.lbl_ss_cfg.setText(
+            "output_name = %s\ndd_configuration_option = %s"
+            % (out or "（未设，抓主屏）", mode))
 
     def _show_banner(self, mode, text, btn_label):
         self._st["_banner_mode"] = mode
@@ -1837,7 +2432,8 @@ def selftest():
                  "remove_resolution", "reload_driver", "open_config_dir",
                  "open_project_dir", "start_install", "is_admin",
                  "sunshine_status", "capture_target", "side_position",
-                 "describe_display"):
+                 "describe_display", "display_modes", "set_display_mode",
+                 "move_display", "set_display_scaling", "scale_options"):
         print("  %-18s %s" % (name, callable(getattr(backend, name, None))))
 
     print("\n-- ui import --")
@@ -1850,7 +2446,6 @@ def selftest():
         app.setStyleSheet(STYLE)
         w = Main()
         print("  Main() constructed OK, %dx%d" % (w.width(), w.height()))
-        print("  mode combo items:", w.cmb_mode.count())
         print("  banner present  :", hasattr(w, "banner"))
         ui_ok = True
 
@@ -1881,30 +2476,36 @@ def selftest():
         checks.append(("图下读数非空（完整读数不被缩写吞掉）",
                        bool(w.lbl_map_legend.text()), w.lbl_map_legend.text()))
         checks.append(("串流去向说得出是哪块屏",
-                       "手机看到 =" in (w.lbl_ss_where.text() or ""),
-                       w.lbl_ss_where.text()))
+                       "手机看到 =" in (w.lbl_ss_state.text() or ""),
+                       w.lbl_ss_state.text()))
         checks.append(("主显示器两个按钮都可点且带跳转提示",
                        all(b.isEnabled() for b in w.prim_btns.values()) and
                        "看不见" in (w.prim_btns["virtual"].toolTip() or ""),
                        [b.isEnabled() for b in w.prim_btns.values()]))
-        # 串流两轴：抓哪块屏 × 另一块屏黑不黑，全部从 conf 回读
+        # 串流：目标只能是 Sunshine 自己枚举到的屏；另一轴是其他屏黑不黑
         axes = w._stream_axes()
         lit_t = [k for k, b in w.ss_btns.items() if bool(b.property("active"))]
         lit_o = [k for k, b in w.others_btns.items() if bool(b.property("active"))]
-        print("  串流两轴          : target=%s keep=%s 亮=%s / %s"
-              % (axes["target"], axes["keep"], lit_t, lit_o))
-        checks.append(("串流画面三态齐全",
-                       set(w.ss_btns) == {"system", "physical", "virtual"},
-                       sorted(w.ss_btns)))
-        checks.append(("另一块屏两态齐全",
+        tnames = {t["key"]: "%s号屏" % t["number"] for t in axes["targets"]}
+        tshow = tnames.get(axes["target"], axes["target"])
+        print("  串流目标          : %s keep=%s 亮=%s / %s"
+              % (tshow, axes["keep"], [tnames.get(k, k) for k in lit_t], lit_o))
+        want_keys = {"system"} | {t["key"] for t in axes["targets"]}
+        checks.append(("串流目标 = 跟随主屏 + Sunshine 枚举到的屏",
+                       set(w.ss_btns) == want_keys,
+                       (sorted(w.ss_btns), sorted(want_keys))))
+        checks.append(("Sunshine 枚举到虚拟屏（EDID 兜底）",
+                       any(t["kind"] == "virtual" for t in axes["targets"]),
+                       [t["kind"] for t in axes["targets"]]))
+        checks.append(("其他屏两态齐全",
                        set(w.others_btns) == {"keep", "blank"},
                        sorted(w.others_btns)))
-        checks.append(("串流画面恰好亮一个且等于 conf 回读",
+        checks.append(("串流目标恰好亮一个且等于 conf 回读",
                        lit_t == [axes["target"]], (lit_t, axes["target"])))
-        checks.append(("另一块屏恰好亮一个且等于 conf 回读",
+        checks.append(("其他屏恰好亮一个且等于 conf 回读",
                        lit_o == [("keep" if axes["keep"] else "blank")],
                        (lit_o, axes["keep"])))
-        checks.append(("跟随系统时「另一块屏」置灰",
+        checks.append(("跟随主屏时其他屏置灰",
                        (axes["target"] != "system") or
                        all(not b.isEnabled() for b in w.others_btns.values()),
                        (axes["target"],
@@ -1947,6 +2548,109 @@ def selftest():
             checks.append(("点主屏正中不动屏",
                            w.map._side_at(rb.center().x(), rb.center().y()) is None,
                            "None"))
+            sub = next((d for d in (s2.get("displays") or [])
+                        if d.get("attached") and not d.get("virtual")
+                        and not d.get("primary")), None)
+            if sub is not None:
+                subc = rects[sub["device"]].center()
+                checks.append(("物理副屏可拖（非主屏）",
+                               w.map._movable_at(subc.x(), subc.y()) == sub["device"],
+                               (sub["device"], w.map._movable_at(subc.x(), subc.y()))))
+            checks.append(("主屏不能拖（固定在 0,0）",
+                           w.map._movable_at(rb.center().x(),
+                                             rb.center().y()) is None,
+                           None))
+
+        # -- system numbers, selection, per-screen settings, drag math -------
+        nums = [(d.get("number"), d["device"])
+                for d in (s2.get("displays") or []) if d.get("attached")]
+        checks.append(("每块屏都有系统编号且连续",
+                       [n for n, _ in nums] == list(range(1, len(nums) + 1)),
+                       nums))
+        checks.append(("选中态默认落在虚拟屏",
+                       w._sel_device == (vd2 or {}).get("device"),
+                       w._sel_device))
+        checks.append(("选中屏的分辨率下拉等于当前模式",
+                       bool(w.cmb_res.currentData()) and
+                       tuple(w.cmb_res.currentData()) ==
+                       ((vd2["width"], vd2["height"]) if vd2 else ()),
+                       (w.cmb_res.count(), w.cmb_res.currentText())))
+        sc = (s2.get("scaling") or {}).get((vd2 or {}).get("device"))
+        checks.append(("缩放下拉选中的是系统回读值",
+                       (("%d%%" % sc) == w.cmb_scale.currentText())
+                       if sc else w.cmb_scale.count() == 0,
+                       (w.cmb_scale.currentText(), sc)))
+        checks.append(("没有应用按钮（选中即生效）",
+                       not hasattr(w, "btn_screen_apply") and
+                       not hasattr(w, "btn_res_apply") and
+                       not hasattr(w, "btn_scale_apply"),
+                       True))
+        # regressions this card had: a stretching 465px combo box ran past the
+        # right edge, and the whole settings row sat below the fold at the
+        # default window size
+        scr = w.findChild(QScrollArea)
+        if scr is not None:
+            panel = scr.widget()
+            br = w.cmb_scale.mapTo(panel, w.cmb_scale.rect().topRight())
+            checks.append(("缩放下拉不超出卡片内容宽",
+                           br.x() <= panel.width() - 1,
+                           (br.x(), panel.width())))
+            bb = w.cmb_scale.mapTo(panel, w.cmb_scale.rect().bottomLeft())
+            checks.append(("分辨率/缩放行在首屏内（不用滚动）",
+                           bb.y() <= scr.viewport().height(),
+                           (bb.y(), scr.viewport().height())))
+        checks.append(("分辨率与缩放在同一行",
+                       abs(w.cmb_res.mapTo(w, w.cmb_res.rect().topLeft()).y() -
+                           w.cmb_scale.mapTo(w, w.cmb_scale.rect().topLeft()).y()) <= 2,
+                       (w.cmb_res.y(), w.cmb_scale.y())))
+
+        probe = DisplayMap()
+        probe.resize(1062, 263)
+        probe.set_state(s2.get("displays") or [], s2.get("reference"), vd2,
+                        s2.get("virtual_side"), s2.get("virtual_side_exact"),
+                        True, selected=(vd2 or {}).get("device"))
+        play = probe._layout()
+        if play and vd2 and phys2:
+            _pk, _porg, prects = play
+            prv = prects[vd2["device"]]
+            prb = prects[phys2["device"]]
+            checks.append(("拖动坐标往返",
+                           probe._to_desktop(prv) == (vd2["x"], vd2["y"]),
+                           (probe._to_desktop(prv), (vd2["x"], vd2["y"]))))
+            near = QRectF(prb.left() - prv.width() + 4, prb.top() + 20,
+                          prv.width(), prv.height())
+            snapped = probe._tidy_rect(near, vd2["device"])
+            checks.append(("拖到主屏边上会吸过去",
+                           abs(snapped.right() - prb.left()) < 0.01,
+                           (snapped.right(), prb.left())))
+            on_top = QRectF(prb.center().x() - prv.width() / 2,
+                            prb.center().y() - prv.height() / 2,
+                            prv.width(), prv.height())
+            pushed = probe._avoid_overlap(on_top, vd2["device"])
+            checks.append(("重叠位置会被推开（Windows 不接受重叠）",
+                           not pushed.intersects(prb), pushed))
+
+            from PySide6.QtGui import QMouseEvent
+            got = []
+            probe.moveRequested.connect(
+                lambda dev, x, y: got.append((dev, x, y)))
+
+            def _mev(t, p, btn, btns):
+                return QMouseEvent(t, p, p, btn, btns, Qt.NoModifier)
+
+            press = QPointF(prv.center())
+            move = press + QPointF(prb.left() - prv.width() + 4 - prv.left(),
+                                   prb.top() + 20 - prv.top())
+            probe.mousePressEvent(_mev(QEvent.MouseButtonPress, press,
+                                       Qt.LeftButton, Qt.LeftButton))
+            probe.mouseMoveEvent(_mev(QEvent.MouseMove, move,
+                                      Qt.NoButton, Qt.LeftButton))
+            probe.mouseReleaseEvent(_mev(QEvent.MouseButtonRelease, move,
+                                         Qt.LeftButton, Qt.NoButton))
+            checks.append(("松手写回的是被拖的那块屏",
+                           bool(got) and got[0][0] == vd2["device"] and
+                           got[0][2] >= 0, got))
+
         shot = w.map.grab()
         import tempfile
         png = os.path.join(tempfile.gettempdir(), "vdd_map_probe.png")
