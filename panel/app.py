@@ -1601,11 +1601,12 @@ class Main(QWidget):
         self.lbl_ss_note.setVisible(False)
         l6.addWidget(self.lbl_ss_note)
 
-        # The target row is rebuilt from Sunshine's own enumeration: only a
-        # screen it listed at startup can be pinned through output_name. Fixed
-        # 「物理屏 / 虚拟屏」 buttons lied whenever there were two physical
-        # screens, and greyed the virtual screen out when its log entry simply
-        # had no GDI name.
+        # The target row is rebuilt from Windows' attached list, so an
+        # extended physical screen has a button even when it was plugged in
+        # after Sunshine started; such a button restarts Sunshine once to let
+        # it enumerate, then pins. Fixed 「物理屏 / 虚拟屏」 buttons lied
+        # whenever there were two physical screens, and greyed the virtual
+        # screen out when its log entry simply had no GDI name.
         self.ss_row = QWidget()
         self.ss_row.setObjectName("Row")
         self.ss_lay = QHBoxLayout(self.ss_row)
@@ -1775,7 +1776,7 @@ class Main(QWidget):
         out = (st.get("output_name") or "").strip()
         dd = (st.get("dd_configuration_option") or "disabled").strip()
         targets = ss.get("targets") or []
-        keys = {t["key"] for t in targets}
+        keys = {t["key"] for t in targets if t.get("key")}
         if not out:
             target = "system"
         elif out in keys:
@@ -1784,6 +1785,7 @@ class Main(QWidget):
             target = "stale"          # pinned to a screen Sunshine no longer lists
         return {"target": target, "keep": dd != "ensure_only_display",
                 "ids": ss.get("display_ids") or {}, "targets": targets,
+                "pending": [t for t in targets if not t.get("key")],
                 "settings": st}
 
     def _add_ss_btn(self, key, text, tip=""):
@@ -1801,9 +1803,14 @@ class Main(QWidget):
 
         Rebuilding every poll would flicker and steal focus; the keys, numbers
         and names are enough of a signature.
+
+        Every attached screen gets a button, even one Sunshine has not
+        enumerated yet (key is None). Hiding those was what made a physical
+        monitor plugged in after Sunshine started have no streaming choice at
+        all; such buttons carry their GDI name and resolve through a restart.
         """
         sig = tuple((t.get("key"), t.get("number"), t.get("kind"),
-                     t.get("name")) for t in targets)
+                     t.get("name"), t.get("gdi")) for t in targets)
         if sig == getattr(self, "_ss_sig", None):
             return
         self._ss_sig = sig
@@ -1820,8 +1827,12 @@ class Main(QWidget):
         for t in targets:
             num = t.get("number") or "?"
             kind = "虚拟" if t.get("kind") == "virtual" else "物理"
+            key = t.get("key") or ("gdi:" + (t.get("gdi") or ""))
             tip = "%s（%s）" % (t.get("name") or "未命名", t.get("gdi") or "")
-            self._add_ss_btn(t["key"], "%s 号屏 · %s" % (num, kind), tip)
+            if not t.get("key"):
+                tip += ("\nSunshine 还没认出这块屏（它只在启动时认屏）；"
+                        "点它会先重启一次 Sunshine")
+            self._add_ss_btn(key, "%s 号屏 · %s" % (num, kind), tip)
         self.ss_lay.addStretch(1)
 
     def _pick_stream_target(self, key):
@@ -2334,9 +2345,12 @@ class Main(QWidget):
         if kind == "stale":
             notes.append("output_name 指向的 device_id 不在 Sunshine 这次的屏列表里；"
                          "重启 Sunshine，或点「跟随主屏」重新选。")
-        if not any(t.get("kind") == "virtual" for t in targets):
-            notes.append("Sunshine 还没枚举到虚拟屏；重启一次 Sunshine 后，"
-                         "这里会出现「3 号屏 · 虚拟」。")
+        pending = [t for t in targets if not t.get("key")]
+        if pending:
+            notes.append("Sunshine 还没认出 %s（它只在启动时认屏）。"
+                         "点它时会先重启一次 Sunshine 再钉住。"
+                         % "、".join("%s 号屏" % (t.get("number") or "?")
+                                    for t in pending))
         self.lbl_ss_note.setText("\n".join(notes))
         self.lbl_ss_note.setVisible(bool(notes))
 
@@ -2486,17 +2500,26 @@ def selftest():
         axes = w._stream_axes()
         lit_t = [k for k, b in w.ss_btns.items() if bool(b.property("active"))]
         lit_o = [k for k, b in w.others_btns.items() if bool(b.property("active"))]
-        tnames = {t["key"]: "%s号屏" % t["number"] for t in axes["targets"]}
+        tnames = {(t.get("key") or "gdi:" + t["gdi"]): "%s号屏" % t["number"]
+                  for t in axes["targets"]}
         tshow = tnames.get(axes["target"], axes["target"])
         print("  串流目标          : %s keep=%s 亮=%s / %s"
               % (tshow, axes["keep"], [tnames.get(k, k) for k in lit_t], lit_o))
-        want_keys = {"system"} | {t["key"] for t in axes["targets"]}
-        checks.append(("串流目标 = 跟随主屏 + Sunshine 枚举到的屏",
+        want_keys = {"system"} | {(t.get("key") or "gdi:" + t["gdi"])
+                                  for t in axes["targets"]}
+        checks.append(("串流目标 = 跟随主屏 + 每块在位的屏（没认到的也能点）",
                        set(w.ss_btns) == want_keys,
-                       (sorted(w.ss_btns), sorted(want_keys))))
-        checks.append(("Sunshine 枚举到虚拟屏（EDID 兜底）",
-                       any(t["kind"] == "virtual" for t in axes["targets"]),
-                       [t["kind"] for t in axes["targets"]]))
+                       (len(w.ss_btns), len(want_keys))))
+        attached = [d for d in (s2.get("displays") or [])
+                    if d.get("attached")]
+        checks.append(("串流目标数 = 在位屏数（扩展物理屏不会漏）",
+                       len(axes["targets"]) == len(attached),
+                       (len(axes["targets"]), len(attached))))
+        checks.append(("Sunshine 认到虚拟屏（EDID 兜底）",
+                       any(t["kind"] == "virtual" and t.get("key")
+                           for t in axes["targets"]),
+                       [(t["kind"], bool(t.get("key")))
+                        for t in axes["targets"]]))
         checks.append(("其他屏两态齐全",
                        set(w.others_btns) == {"keep", "blank"},
                        sorted(w.others_btns)))

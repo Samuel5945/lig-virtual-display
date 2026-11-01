@@ -652,26 +652,34 @@ def _sunshine_entry_screen(dv, attached):
 
 
 def sunshine_targets(displays=None):
-    """Screens Sunshine actually enumerated, joined to Windows, by number.
+    """Every attached screen, with Sunshine's device_id where it knows one.
 
-    Each item carries key = the device_id output_name would hold, plus number,
-    kind, friendly name and GDI name. Sunshine can only capture a screen it
-    listed at startup, so the panel offers exactly these instead of guessing
-    from the physical/virtual split.
+    Listing only what Sunshine enumerated at *its* startup used to hide a
+    screen that was plugged in (or woken) later: the extended physical monitor
+    showed up in Windows and in the "phone cannot see" line, but the 「手机看
+    哪块」row simply had no button for it. The row now follows Windows' own
+    attached list and carries key = None for screens Sunshine has not seen yet;
+    the caller restarts Sunshine, which re-enumerates, then pins the device_id.
+
+    key  = output_name's value when Sunshine listed the screen, else None
+    gdi  = the Windows display name - stable no matter what Sunshine saw
     """
     if displays is None:
         displays = list_displays()
     attached = [d for d in displays if d.get("attached")]
-    targets = []
+    by_gdi = {}
     for dv in sunshine_displays():
         d = _sunshine_entry_screen(dv, attached)
-        if d is None:
-            continue
+        if d is not None and d["device"] not in by_gdi:
+            by_gdi[d["device"]] = dv
+    targets = []
+    for d in attached:
+        dv = by_gdi.get(d["device"]) or {}
         targets.append({
             "key": dv.get("device_id"),
             "number": d.get("number") or 0,
             "kind": "virtual" if d["virtual"] else "physical",
-            "name": dv.get("friendly_name") or "",
+            "name": dv.get("friendly_name") or d.get("monitor") or "",
             "gdi": d["device"],
             "primary": bool(d.get("primary")),
         })

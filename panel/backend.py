@@ -11,6 +11,7 @@ vdd_core.py changes the panel's behaviour without a rebuild.
 
 import os
 import sys
+import time
 
 ROOT = r"C:\VirtualDisplay"
 
@@ -380,14 +381,17 @@ def configure_sunshine_follow():
 def set_stream_target(target, keep_others=True):
     """Choose which screen the phone sees, and what the others do.
 
-    ``target``: 'system', a Sunshine device_id from sunshine_targets(), or the
-    legacy 'physical'/'virtual' aliases. ``keep_others``: True leaves the rest
-    of the desktop alone; False makes Sunshine keep only the pinned screen
-    active for the duration of the session (and revert when the last client
-    leaves). 'system' ignores it - handing the choice back to Windows means
-    not managing the topology at all.
+    ``target``: 'system', a Sunshine device_id from sunshine_targets(), the
+    legacy 'physical'/'virtual' aliases, or 'gdi:\\\\.\\DISPLAYn' for a screen
+    Sunshine has not enumerated yet. ``keep_others``: True leaves the rest of
+    the desktop alone; False makes Sunshine keep only the pinned screen active
+    for the duration of the session (and revert when the last client leaves).
+    'system' ignores it - handing the choice back to Windows means not
+    managing the topology at all.
 
-    Sunshine only re-reads its config on start, so every path restarts it.
+    Sunshine only reads the config and enumerates screens on start, so every
+    path restarts it. A 'gdi:' target costs one extra restart: the first one
+    lets Sunshine see the newly plugged screen, the second applies output_name.
     """
     if core is None:
         return _err(CORE_ERROR)
@@ -399,8 +403,27 @@ def set_stream_target(target, keep_others=True):
             if not dev:
                 return _err("Sunshine 日志里还没有%s的 device_id —— 先重启一次 Sunshine"
                             % ("物理屏" if target == "physical" else "虚拟屏"))
+        elif str(target).startswith("gdi:"):
+            gdi = str(target)[4:]
+            rr = restart_sunshine_service()
+            if not rr.get("ok"):
+                return _err("要让 Sunshine 认出这块屏，重启失败：%s"
+                            % (rr.get("error") or "未知原因"))
+            # the service returns before its device list reaches the log; give
+            # it a few seconds rather than failing on a race we just created
+            hit = None
+            for _ in range(20):
+                hit = next((t for t in core.sunshine_targets()
+                            if t["gdi"] == gdi and t.get("key")), None)
+                if hit:
+                    break
+                time.sleep(0.4)
+            if hit is None:
+                return _err("Sunshine 重启后仍没认出 %s（屏幕可能在休眠，"
+                            "或已被拔掉）" % gdi)
+            dev = hit["key"]
         else:
-            valid = {t["key"] for t in core.sunshine_targets()}
+            valid = {t["key"] for t in core.sunshine_targets() if t.get("key")}
             if target not in valid:
                 return _err("Sunshine 没有枚举到这块屏：%s" % target)
             dev = target
