@@ -1567,7 +1567,7 @@ class Main(QWidget):
             "显示模式",
             [("extend", "扩展", False),
              ("virtual", "仅虚拟屏", True),
-             ("physical", "仅物理屏", False),
+             ("physical", "关闭虚拟屏", False),
              ("clone", "复制", False)],
             self._set_topo)
         # mode -> primary -> placement is the order the facts depend on:
@@ -1943,6 +1943,10 @@ class Main(QWidget):
             # writing into the driver's config dir needs admin; run the panel
             # elevated rather than failing with a permission error
             self._need_admin(backend.create_default_config)
+        elif mode == "reattach":
+            # 只是把断开的那一路点回来（Windows 自己的显示配置），不碰驱动，
+            # 所以不用管理员权限
+            self._act(backend.set_topology, "extend")
 
     # ---------------- refresh ----------------
 
@@ -2052,6 +2056,18 @@ class Main(QWidget):
                               "点右侧按钮写入一份默认配置（1 块屏、2560x1440/1080p/4K、60/120/144Hz），"
                               "然后重载驱动。"
                               % (s.get("config_error") or ""), "创建默认配置")
+        elif not vd and s.get("physical"):
+            # 没有虚拟屏亮着有两种成因，机器上读不出是哪种（断开连接和驱动没挂，
+            # 在 Windows 里都是「这块 target 在表里但不活动」），所以话不说死：
+            # 把便宜的那一步做成按钮，另一条在配置卡上一直摆着「重载驱动」
+            self.dot.set_state(False, C["warning"])
+            self._flash("虚拟屏未点亮", C["warning"])
+            self._show_banner("reattach",
+                              "没有虚拟屏亮着。可能是这块屏被关掉了（这里点过"
+                              "「关闭虚拟屏」，或系统设置里断开了连接）—— 点右侧按钮"
+                              "接回来，物理屏（含扩展副屏）不受影响；\n"
+                              "也可能是驱动没挂上 —— 那用下面配置卡上的「重载驱动」。",
+                              "接回虚拟屏")
         elif not vd:
             self.dot.set_state(False, C["warning"])
             self._flash("未挂载", C["warning"])
@@ -2080,9 +2096,16 @@ class Main(QWidget):
 
             actual = s.get("virtual_count", 0)
             if cfg["count"] != actual:
-                self.lbl_cfg_hint.setText(
-                    "\u3000\u3000改动还没生效：配置里是 %d 块虚拟屏，实际有 %d 块。"
-                    "点下面对应的按钮重载驱动。" % (cfg["count"], actual))
+                if not vd and s.get("physical"):
+                    # 0 块有两种读法（被关掉 / 驱动没挂），别说死一种
+                    self.lbl_cfg_hint.setText(
+                        "\u3000\u3000配置里是 %d 块虚拟屏，现在 0 块。要是这块屏被"
+                        "关掉了，点上面的「扩展」接回来；要是刚改过配置，用下面的"
+                        "「重载驱动」。" % cfg["count"])
+                else:
+                    self.lbl_cfg_hint.setText(
+                        "\u3000\u3000改动还没生效：配置里是 %d 块虚拟屏，实际有 %d 块。"
+                        "点下面对应的按钮重载驱动。" % (cfg["count"], actual))
                 self.lbl_cfg_hint.setStyleSheet(
                     "font-size:11px;color:%s;font-weight:600;" % C["warning"])
             else:
@@ -2117,6 +2140,14 @@ class Main(QWidget):
         for key, b in self.topo_btns.items():
             mark(b, key == topo)
             b.setEnabled(bool(valid.get(key, True)))
+        # 「关闭虚拟屏」顶掉了原来的「仅物理屏」：后者是 Windows 的「仅电脑屏幕」
+        # (SDC_TOPOLOGY_INTERNAL)，会把扩展出去的物理副屏一起关掉；这里只摘虚拟屏
+        # 那一路，实测两块物理屏的编号/坐标/分辨率/缩放逐位不变。
+        self.topo_btns["physical"].setToolTip(
+            "只断开虚拟屏那一路，物理屏（含扩展出去的副屏）一块都不关。\n"
+            "接回来点「扩展」—— 摆位、分辨率、缩放都留在原地。")
+        self.topo_btns["extend"].setToolTip(
+            "物理屏 + 虚拟屏一起点亮；虚拟屏刚被关掉时，这一点就是把它接回来。")
 
         vd_primary = bool(vd and vd.get("primary"))
         for key, b in self.prim_btns.items():
@@ -2152,7 +2183,13 @@ class Main(QWidget):
         attached = [d for d in (s.get("displays") or []) if d.get("attached")]
         sel = getattr(self, "_sel_device", None)
         if sel not in [d["device"] for d in attached]:
-            pick = vd or phys or (attached[0] if attached else None)
+            # the default is virtual-first, but `phys` is a *list* (the primary
+            # row numbers each candidate), so the pick has to be one dict.
+            # Without this the card crashed with "list indices must be
+            # integers" in exactly the two states where there is no virtual
+            # screen to pick: 虚拟屏已关闭 and 驱动装了但虚拟屏没挂.
+            pick = (vd or (phys[0] if phys else None)
+                    or (attached[0] if attached else None))
             sel = pick["device"] if pick else None
             self._sel_device = sel
         self.map.set_state(s.get("displays") or [], s.get("reference"),
@@ -2186,6 +2223,11 @@ class Main(QWidget):
         if topo == "virtual":
             hint = ("当前：%s —— 物理屏已关闭。按 Win+P 或点上面的「扩展」可以恢复。"
                     % cur)
+        elif topo == "physical" and not vd and phys:
+            hint = ("当前：%s。%d 块物理屏（含扩展副屏）都在位。"
+                    "「关闭虚拟屏」只断虚拟屏那一路（跟系统设置里那块屏的「断开连接」"
+                    "是同一处，副屏不受影响）；要把它接回来点「扩展」——"
+                    "摆位、分辨率、缩放都留在原地。" % (cur, len(phys)))
         else:
             hint = ("当前：%s。这里改的就是 Windows 自己的显示模式，"
                     "跟系统设置里的「多显示器」是同一处，两边会同步。"
@@ -2447,7 +2489,8 @@ def selftest():
                  "open_project_dir", "start_install", "is_admin",
                  "sunshine_status", "capture_target", "side_position",
                  "describe_display", "display_modes", "set_display_mode",
-                 "move_display", "set_display_scaling", "scale_options"):
+                 "move_display", "set_display_scaling", "scale_options",
+                 "set_topology"):
         print("  %-18s %s" % (name, callable(getattr(backend, name, None))))
 
     print("\n-- ui import --")
@@ -2496,6 +2539,21 @@ def selftest():
                        all(b.isEnabled() for b in w.prim_btns.values()) and
                        "看不见" in (w.prim_btns["virtual"].toolTip() or ""),
                        [b.isEnabled() for b in w.prim_btns.values()]))
+        # 「仅物理屏」会把扩展出去的物理副屏一起关掉，这一格现在只关虚拟屏
+        checks.append(("这一格叫「关闭虚拟屏」",
+                       w.topo_btns["physical"].text() == "关闭虚拟屏",
+                       w.topo_btns["physical"].text()))
+        checks.append(("说明写清物理副屏不受影响",
+                       "副屏" in (w.topo_btns["physical"].toolTip() or ""),
+                       (w.topo_btns["physical"].toolTip() or "").replace("\n", " / ")))
+        checks.append(("虚拟屏在位才可关、不在位就置灰",
+                       w.topo_btns["physical"].isEnabled() == bool(vd2 and phys2),
+                       (w.topo_btns["physical"].isEnabled(), bool(vd2),
+                        bool(phys2))))
+        checks.append(("虚拟屏没亮时说明给的是「断开/接回」那一套",
+                       (vd2 is not None) or (topo != "physical") or
+                       ("断开连接" in (w.lbl_layout_hint.text() or "")),
+                       (topo, (w.lbl_layout_hint.text() or "")[:28])))
         # 串流：目标只能是 Sunshine 自己枚举到的屏；另一轴是其他屏黑不黑
         axes = w._stream_axes()
         lit_t = [k for k, b in w.ss_btns.items() if bool(b.property("active"))]

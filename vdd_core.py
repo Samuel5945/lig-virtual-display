@@ -182,7 +182,10 @@ SDC_APPLY = 0x00000080
 TOPOLOGIES = {
     "extend":   (SDC_TOPOLOGY_EXTEND,   "扩展（物理屏 + 虚拟屏）"),
     "virtual":  (SDC_TOPOLOGY_EXTERNAL, "只用虚拟屏（关掉物理屏）"),
-    "physical": (SDC_TOPOLOGY_INTERNAL, "只用物理屏"),
+    # 「仅物理屏」原来是 SDC_TOPOLOGY_INTERNAL（Windows 的「仅电脑屏幕」），
+    # 那块把扩展出去的物理副屏也一起关掉，所以这个位置改成只关虚拟屏；
+    # code 保留但不再走 topology_valid / set_topology（见 disconnect_virtual）。
+    "physical": (SDC_TOPOLOGY_INTERNAL, "没有虚拟屏亮着"),
     "clone":    (SDC_TOPOLOGY_CLONE,    "复制（两块屏显示相同内容）"),
 }
 
@@ -922,22 +925,33 @@ _user32.SetDisplayConfig.restype = ctypes.c_long
 
 
 def topology_valid(name):
-    """True if Windows will accept this topology right now."""
+    """True if Windows will accept this choice right now.
+
+    "physical" is not a Windows topology any more: it means 只关虚拟屏
+    (disconnect_virtual), so it is only offered while a virtual screen is on
+    and at least one physical screen would stay lit.
+    """
     if name not in TOPOLOGIES:
         return False
+    if name == "physical":
+        return virtual_off_possible()
     code = TOPOLOGIES[name][0]
     return _user32.SetDisplayConfig(0, None, 0, None, SDC_VALIDATE | code) == 0
 
 
 def set_topology(name):
-    """Switch between extend / only-virtual / only-physical / clone.
+    """Switch between extend / only-virtual / virtual-off / clone.
 
     NOTE for callers: "virtual" turns the physical monitor OFF. If the user is
     looking at this panel on the physical monitor, their screen goes dark until
     it is switched back - the UI must warn before offering it.
+    "physical" only turns the VIRTUAL screen off; the physical screens,
+    including an extended second monitor, stay exactly where they are.
     """
     if name not in TOPOLOGIES:
         return {"ok": False, "error": "unknown topology: %s" % name}
+    if name == "physical":
+        return disconnect_virtual()
     code, _label = TOPOLOGIES[name]
     rc = _user32.SetDisplayConfig(0, None, 0, None, SDC_APPLY | code)
     if rc != 0:
@@ -1332,6 +1346,108 @@ def set_scaling(device, percent):
         return {"ok": True,
                 "out": "%s 缩放 -> %d%%（该屏只到 %d%%）" % (device, got, got)}
     return {"ok": True, "out": "%s 缩放 -> %d%%" % (device, got)}
+
+
+# --------------------------------------------------------------------------- #
+# 只关虚拟屏：Windows 的「断开这块显示器」，不是「仅电脑屏幕」
+# --------------------------------------------------------------------------- #
+
+SDC_USE_SUPPLIED_DISPLAY_CONFIG = 0x00000020
+SDC_PATH_ACTIVE = 0x00000001
+
+# 私有 WinDLL 实例：在共享的 ctypes.windll.user32 上再挂一套签名，会把别处
+# 的调用约定顶掉（那是这个仓库踩过的坑），所以另开一个句柄。
+_dc = ctypes.WinDLL("user32", use_last_error=True)
+_dc.GetDisplayConfigBufferSizes.argtypes = [
+    wintypes.UINT, ctypes.POINTER(wintypes.UINT), ctypes.POINTER(wintypes.UINT)]
+_dc.GetDisplayConfigBufferSizes.restype = ctypes.c_long
+_dc.QueryDisplayConfig.argtypes = [
+    wintypes.UINT, ctypes.POINTER(wintypes.UINT), ctypes.POINTER(_DCPathInfo),
+    ctypes.POINTER(wintypes.UINT), ctypes.POINTER(_DCModeInfo), ctypes.c_void_p]
+_dc.QueryDisplayConfig.restype = ctypes.c_long
+_dc.SetDisplayConfig.argtypes = [
+    wintypes.UINT, ctypes.POINTER(_DCPathInfo),
+    wintypes.UINT, ctypes.POINTER(_DCModeInfo), wintypes.UINT]
+_dc.SetDisplayConfig.restype = ctypes.c_long
+_dc.DisplayConfigGetDeviceInfo.argtypes = [ctypes.c_void_p]
+_dc.DisplayConfigGetDeviceInfo.restype = ctypes.c_long
+
+
+def _active_paths():
+    """(n, pathArray, m, modeArray) - 当前活动的那些显示路径。"""
+    np_, nm_ = wintypes.UINT(0), wintypes.UINT(0)
+    if _dc.GetDisplayConfigBufferSizes(
+            _QDC_ONLY_ACTIVE_PATHS, ctypes.byref(np_), ctypes.byref(nm_)) != 0:
+        return 0, None, 0, None
+    paths = (_DCPathInfo * max(1, np_.value))()
+    modes = (_DCModeInfo * max(1, nm_.value))()
+    if _dc.QueryDisplayConfig(_QDC_ONLY_ACTIVE_PATHS, ctypes.byref(np_), paths,
+                              ctypes.byref(nm_), modes, None) != 0:
+        return 0, None, 0, None
+    return np_.value, paths, nm_.value, modes
+
+
+def _path_source_name(path):
+    r"""这条 path 对应的 GDI 名字（\\.\DISPLAY6 这种），读不到回 None。"""
+    req = _DCSourceName()
+    req.header.type = _DC_GET_SOURCE_NAME
+    req.header.size = ctypes.sizeof(req)
+    req.header.adapterId = path.sourceInfo.adapterId
+    req.header.id = path.sourceInfo.id
+    if _dc.DisplayConfigGetDeviceInfo(ctypes.byref(req)) != 0:
+        return None
+    return req.viewGdiDeviceName
+
+
+def virtual_off_possible(displays=None):
+    """能不能只关虚拟屏：得有虚拟屏可关，也得留着一块看得见的物理屏。"""
+    attached = [d for d in (displays if displays is not None
+                            else list_displays()) if d.get("attached")]
+    return (any(d["virtual"] for d in attached)
+            and any(not d["virtual"] for d in attached))
+
+
+def disconnect_virtual():
+    """把虚拟屏那一路从活动拓扑里摘掉；物理屏（含扩展出去的副屏）一块不动。
+
+    为什么不走 SDC_TOPOLOGY_INTERNAL：那是 Windows 的「仅电脑屏幕」，会把
+    外接的物理副屏一起关掉，而这里要的只是「别要虚拟屏」。做法按
+    SetDisplayConfig 的文档：只有带 SDC_PATH_ACTIVE 的 path 会被应用，所以
+    清掉虚拟屏那条的 ACTIVE 位，mode 数组原样带着，用
+    SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG（文档里「临时配置」那一档，
+    不写数据库，免得把「扩展」的存档改掉）。
+
+    实测（2026-11-01，本机 4K 主屏 + 2160x1440 扩展物理屏 + 2560x1440 虚拟屏，
+    连关连开 3 轮）：关掉后两块物理屏的编号/坐标/分辨率/缩放逐位不变；
+    接回只要点「扩展」（SDC_TOPOLOGY_EXTEND 用数据库里上次扩展的配置），
+    虚拟屏回到 @(1277,-1440) 2560x1440@60 缩放 225%，也逐位不变 ——
+    所以不需要自己存快照，面板重开、进程没了都还能接回来。
+    """
+    attached = [d for d in list_displays() if d["attached"]]
+    vds = [d for d in attached if d["virtual"]]
+    phys = [d for d in attached if not d["virtual"]]
+    if not vds:
+        return {"ok": False, "error": "现在没有挂着的虚拟屏，不用关"}
+    if not phys:
+        return {"ok": False,
+                "error": "只剩虚拟屏，关了就没有看得见的屏 —— 先点「扩展」把物理屏叫回来"}
+    n, paths, m, modes = _active_paths()
+    if not n:
+        return {"ok": False, "error": "读不到显示路径表"}
+    names = {d["device"] for d in vds}
+    hit = [i for i in range(n) if _path_source_name(paths[i]) in names]
+    if not hit:
+        return {"ok": False,
+                "error": "活动显示路径里找不到虚拟屏（%s）" % "、".join(sorted(names))}
+    for i in hit:
+        paths[i].flags &= ~SDC_PATH_ACTIVE
+    rc = _dc.SetDisplayConfig(n, paths, m, modes,
+                              SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG)
+    if rc != 0:
+        return {"ok": False, "error": "SetDisplayConfig failed (code %d)" % rc}
+    return {"ok": True,
+            "out": "虚拟屏已关闭；%d 块物理屏（含扩展副屏）没动 —— "
+                   "要接回来点「扩展」" % len(phys)}
 
 
 _last_device_installed = None
